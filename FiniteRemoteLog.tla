@@ -15,7 +15,7 @@
  * limitations under the License.
  *)
  
------------------------- MODULE FiniteReplicatedLog ------------------------
+------------------------ MODULE FiniteRemoteLog ------------------------
 
 EXTENDS Integers
 
@@ -30,7 +30,7 @@ ASSUME
     /\ LogSize \in Nat
     /\ Nil \notin LogRecords
 *)
-VARIABLE logs \* divij - logs is a sequence of LogType where each index represents a replica
+VARIABLE logs
 
 MaxOffset == LogSize - 1
 
@@ -38,15 +38,6 @@ Offsets == 0 .. MaxOffset
 
 StartOffset == 0
 
-
-\*
-\* Logs is a sequence where index is replica number
-\* log = logs[replica]
-\* log is a struct:
-\*     - endOffset 
-\*     - records is a sequence where index is offset
-\* 
-\* 
 LOCAL LogType == [endOffset : Offsets \union {LogSize}, 
                   records : [Offsets -> LogRecords \union {Nil}]]
 LOCAL EmptyLog == [endOffset |-> 0, 
@@ -100,7 +91,6 @@ LOCAL ReplicaLogTypeOk(replica) == LET log == logs[replica] IN
     /\ log \in LogType
     /\ \A offset \in GetWrittenOffsets(replica) : log.records[offset] \in LogRecords
     /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = Nil
-    /\ GetEndOffset(replica) >= log.startOffset
 
 TypeOk == \A replica \in Replicas : ReplicaLogTypeOk(replica)
 
@@ -117,8 +107,6 @@ TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
     /\ logs' = [logs EXCEPT 
         ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE Nil], 
         ![replica].endOffset = newEndOffset]
-        
-\* diviv - TODO - Add new function: Expire which changes the startOffset
 
 ReplicateTo(fromReplica, toReplica) == \E offset \in Offsets, record \in LogRecords :
     /\ HasEntry(fromReplica, record, offset)
@@ -134,6 +122,5 @@ Spec == Init /\ [][Next]_logs
 THEOREM Spec => []TypeOk
 =============================================================================
 \* Modification History
-\* Last modified Fri Sep 16 11:13:38 CEST 2022 by diviv
 \* Last modified Mon Jul 09 14:23:51 PDT 2018 by jason
 \* Created Sat Jun 23 13:24:52 PDT 2018 by jason

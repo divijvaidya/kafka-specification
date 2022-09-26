@@ -18,7 +18,7 @@
 -------------------------- MODULE KafkaReplication --------------------------
 
 (**
- * This module contains the core Kafka replication state and its basic oeprators.
+ * This module contains the core Kafka replication state and its basic operators.
  * We model a single partition with a constant replication factor. A replica in this
  * model has its own state and can be either a leader or a follower at any given time.
  *
@@ -29,6 +29,7 @@
 
 EXTENDS Integers, Util
 
+\* divij - inputs provided to the execution, usually defined in configuration
 CONSTANTS 
     Replicas, 
     LogSize, 
@@ -38,10 +39,12 @@ CONSTANTS
 None == "NONE"
 Nil == -1
 
+\* divij - the inputs defined in constants must satisfy the validations available in assume
 ASSUME 
     /\ None \notin Replicas
     /\ MaxLeaderEpoch \in Nat
 
+\* divij - stateful parameters 
 VARIABLES
     \* This is a function from the replicas to their local logs.  
     replicaLog,
@@ -81,6 +84,7 @@ RecordSeq == INSTANCE IdSequence WITH MaxId <- MaxRecords - 1, nextId <- nextRec
 \* addition of the leader epoch in the message format, we simply ignore the epoch in the message.
 LogRecords == [id : RecordSeq!IdSet, epoch : LeaderEpochSeq!IdSet] 
 
+\* divij - TODO: Add remote log metdata 
 ReplicaLog == INSTANCE FiniteReplicatedLog WITH logs <- replicaLog
 ReplicaOpt == Replicas \union {None}
 LeaderEpochOpt == LeaderEpochSeq!IdSet \union {Nil}
@@ -92,7 +96,8 @@ QuorumState == [leaderEpoch: LeaderEpochOpt,
  * Each replica has a cached copy of the quorum state and a local high watermark. These
  * get updated in accordance with the Kafka replication protocol. For example, the leader
  * epoch is updated when a LeaderAndIsr request is received. 
- *)                
+ *)   
+ \* divij -> HW = LSO              
 ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize}, 
                  leaderEpoch: LeaderEpochOpt,
                  leader : ReplicaOpt, 
@@ -133,7 +138,7 @@ IsTrueLeader(leader) ==
 
 (**
  * Helper function to "send" a new LeaderAndIsr request. The leader epoch is bumped,
- * the quorum state is updatd, and the new request is added to the LeaderAndIsr request set.
+ * the quorum state is updated, and the new request is added to the LeaderAndIsr request set.
  *)
 ControllerUpdateIsr(newLeader, newIsr) == \E newLeaderEpoch \in LeaderEpochSeq!IdSet :
     /\ LeaderEpochSeq!NextId(newLeaderEpoch)
@@ -170,7 +175,7 @@ ControllerShrinkIsr == \E replica \in Replicas :
 (**
  * Leader election by the controller is triggered by the failure of a broker or the need 
  * to balance leaders. For clean leader election, we choose a member of the ISR and we 
- * bump the leader epoch. In this model, the coice to elect a new leader can be made 
+ * bump the leader epoch. In this model, the choice to elect a new leader can be made 
  * arbitarily by the controller. 
  *)
 ControllerElectLeader == \E newLeader \in quorumState.isr :
@@ -216,11 +221,11 @@ QuorumUpdateLeaderAndIsr(leader, newIsr) ==
     /\ quorumState' = [quorumState EXCEPT !.isr = newIsr]
     /\ replicaState' = [replicaState EXCEPT ![leader].isr = newIsr]
 
-IsFollowerCaughtUp(leader, follower, endOffset) ==
+IsFollowerCaughtUp(leader, follower, leaderHw) ==
     /\ ReplicaIsFollowing(follower, leader) 
-    /\  \/ endOffset = 0
-        \/  /\ endOffset > 0 
-            /\ LET offset == endOffset - 1 IN \E record \in LogRecords : 
+    /\  \/ leaderHw = 0
+        \/  /\ leaderHw > 0 
+            /\ LET offset == leaderHw - 1 IN \E record \in LogRecords : 
                 /\ ReplicaLog!HasEntry(leader, record, offset)
                 /\ ReplicaLog!HasOffset(follower, offset)
 
@@ -236,21 +241,6 @@ LeaderShrinkIsr == \E leader \in Replicas :
        IN  \E replica \in isr \ {leader} :
            /\ ~ IsFollowerCaughtUp(leader, replica, endOffset) 
            /\ QuorumUpdateLeaderAndIsr(leader, isr \ {replica})
-    /\ UNCHANGED <<nextRecordId, replicaLog, nextLeaderEpoch, leaderAndIsrRequests>>
-
-(**
- * We can add a replica to the ISR if it has caught up to the current high watermark.
- * We depend on writes to the quorum to fence zombie leaders. In practice this requires
- * propagation of zk version in order to be able to do a CAS operation on the partition
- * state. We do not validate this propagation logic in this model and simply allow the
- * ISR expansion iff the leader and quorum state matches.
- *)
-LeaderExpandIsr == \E leader \in Replicas :
-    /\ LET isr == replicaState[leader].isr
-           leaderHw == replicaState[leader].hw
-       IN  \E replica \in Replicas \ isr :
-           /\ IsFollowerCaughtUp(leader, replica, leaderHw)
-           /\ QuorumUpdateLeaderAndIsr(leader, isr \union {replica})
     /\ UNCHANGED <<nextRecordId, replicaLog, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
@@ -278,6 +268,8 @@ LeaderIncHighWatermark == \E offset \in ReplicaLog!Offsets, leader \in Replicas 
  *
  * TODO: Is this what we actually do in the code?   
  *) 
+\* divij - TODO Break this into multiple states. Become follower -> Fetch -> Truncate -> BuildAuxState
+\* divij - question - why is this considered atomic?
 BecomeFollowerAndTruncateTo(leader, replica, truncationOffset) == \E leaderAndIsrRequest \in leaderAndIsrRequests :
     /\ leader # replica
     /\ leaderAndIsrRequest.leader = leader
@@ -292,6 +284,40 @@ BecomeFollowerAndTruncateTo(leader, replica, truncationOffset) == \E leaderAndIs
          isr |-> leaderAndIsrRequest.isr,                                                        
          hw |-> Min({truncationOffset, @.hw})]] 
     /\ UNCHANGED <<nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+    
+OffsetsWithLargerEpochs(replica, epoch) ==
+    {entry.offset : entry \in 
+        {entry \in ReplicaLog!GetAllEntries(replica) : entry.record.epoch > epoch}}
+
+LookupOffsetForEpoch(leader, follower, epoch) == 
+    IF ReplicaLog!IsEmpty(leader)
+    THEN replicaState[follower].hw
+    ELSE IF ReplicaLog!GetLatestRecord(leader).epoch = epoch
+    THEN ReplicaLog!GetEndOffset(leader)
+    ELSE LET offsetWithLargerEpochs == OffsetsWithLargerEpochs(leader, epoch)
+         IN IF offsetWithLargerEpochs = {} 
+            THEN replicaState[follower].hw 
+            ELSE Min(offsetWithLargerEpochs) 
+
+MatchingOffsets(replica1, replica2) ==
+    {entry.offset : entry \in
+        {entry \in ReplicaLog!GetAllEntries(replica1) : 
+          ReplicaLog!HasEntry(replica2, entry.record, entry.offset)}}
+
+(**
+ * To find the offset to truncate to, we verify offset and epoch going backwards 
+ * from the end of the follower's log. The truncation offset is one more than the 
+ * first offset that matches.
+ *
+ * TODO: Does this match the implementation?
+ *)
+FirstNonMatchingOffsetFromTail(leader, follower) ==
+    IF ReplicaLog!IsEmpty(leader)
+    THEN 0
+    ELSE LET matchingOffsets == MatchingOffsets(follower, leader)
+         IN IF matchingOffsets = {} 
+            THEN 0
+            ELSE Max(matchingOffsets) + 1 
 
 (**
  * As long as a presumed leader and follower agree on the leader status, we will replicate 
@@ -344,8 +370,155 @@ StrongIsr == \A r1 \in Replicas :
  *)
 LeaderInIsr == quorumState.leader \in quorumState.isr
 
+(**
+ * divij - TODO - In zookeeper mode, we check if the replica is alive. In KRaft mode, only replicas which are not fenced nor in controlled shutdown are
+ * allowed to join the ISR.
+ *)
+LOCAL IsFollowerIsrEligible(follower) == TRUE
+     
+
+LOCAL IsFollowingLeaderEpoch(leader, follower) == 
+    /\ ReplicaPresumesLeadership(leader)
+    /\ replicaState[follower].leader = leader
+    /\ replicaState[follower].leaderEpoch = replicaState[leader].leaderEpoch \* divij - TODO - add the condition to check FollowerEndOffset >= LeaderEpochStartOffset
+
+(**
+ * Followers can fetch as long as they have the same epoch as the leader. Prior to fetching,
+ * followers are responsible for truncating the log so that it matches the leader's. The
+ * local high watermark is updated at the time of fetching.
+ *)
+FencedFollowerFetch == \E follower, leader \in Replicas :
+    /\ IsFollowingLeaderEpoch(leader, follower)
+    /\ ReplicaLog!ReplicateTo(leader, follower)
+    /\ LET  newEndOffset == ReplicaLog!GetEndOffset(follower) + 1
+            leaderHw == replicaState[leader].hw
+            followerHw == Min({leaderHw, newEndOffset})
+       IN   replicaState' = [replicaState EXCEPT ![follower].hw = followerHw]
+    /\ UNCHANGED <<nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
+(**
+ * The high watermark is advanced if all members of the ISR are following the leader's
+ * epoch and have replicated up to the current high watermark. Note that we depend only
+ * on the leader's local ISR and not the quorum.
+ *)
+FencedLeaderIncHighWatermark == \E leader \in Replicas :
+    /\ LET leaderHw == replicaState[leader].hw 
+       IN  /\ ReplicaLog!HasOffset(leader, leaderHw)
+           /\ \A follower \in replicaState[leader].isr : 
+              /\ IsFollowingLeaderEpoch(leader, follower)
+              /\ ReplicaLog!HasOffset(follower, leaderHw)
+    /\ replicaState' = [replicaState EXCEPT ![leader].hw = @ + 1]
+    /\ UNCHANGED <<nextRecordId, replicaLog, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
+(**
+ * A replica is taken out of the ISR by the leader if it is not following the right epoch 
+ * or if its end offset is lagging. In this model, the decision to shrink the ISR is made 
+ * arbitrarily by the leader if either of these conditions is met. It can choose to shrink 
+ * the ISR immediately after becoming leader or it can wait indefinitely before doing so.
+ *)
+FencedLeaderShrinkIsr == \E leader \in Replicas :
+    /\ LET isr == replicaState[leader].isr
+           leaderEndOffset == ReplicaLog!GetEndOffset(leader) 
+       IN  \E follower \in isr \ {leader} :
+           /\ \/ ~ IsFollowingLeaderEpoch(leader, follower)
+              \/ ReplicaLog!GetEndOffset(follower) < leaderEndOffset
+           /\ QuorumUpdateLeaderAndIsr(leader, isr \ {follower})
+    /\ UNCHANGED <<nextRecordId, replicaLog, nextLeaderEpoch, leaderAndIsrRequests>>
+
+LOCAL HasHighWatermarkReachedCurrentEpoch(leader) ==
+    LET hw == replicaState[leader].hw
+    IN  \/ hw = ReplicaLog!GetEndOffset(leader)
+        \/ \E record \in LogRecords :
+            /\ ReplicaLog!HasEntry(leader, record, hw)
+            /\ record.epoch = replicaState[leader].leaderEpoch
+
+LOCAL HasFollowerReachedHighWatermark(leader, follower) == 
+    LET hw == replicaState[leader].hw
+    IN  \/ hw = 0
+        \/ /\ hw > 0
+           /\ ReplicaLog!HasOffset(follower, hw - 1)
+(**
+ * Generally speaking, a replica which has caught up to the high watermark is eligible
+ * to join the ISR, but there is one subtlety. When a follower becomes leader, 
+ * its high watermark is typically behind the leader. Since it does not know what the true
+ * high watermark was at the time the leader failed (or shutdown), it must be conservative 
+ * when adding new members to the ISR. We can be assured that all members of the current 
+ * ISR have replicated up to whatever the leader's high watermark was, but it is not safe 
+ * to assume the same for new replicas until they have replicated ALL of the messages from 
+ * the previous leader. In other words, we need to wait until it has at least replicated up
+ * to the start of the its own leader epoch.
+ *)
+FencedLeaderExpandIsr == \E leader \in Replicas :
+    /\ LET isr == replicaState[leader].isr
+       IN  \E follower \in Replicas \ isr :
+           /\ IsFollowingLeaderEpoch(leader, follower)
+           /\ IsFollowerIsrEligible(follower)
+           /\ HasFollowerReachedHighWatermark(leader, follower)
+           /\ HasHighWatermarkReachedCurrentEpoch(leader)
+           /\ QuorumUpdateLeaderAndIsr(leader, isr \union {follower})
+    /\ UNCHANGED <<nextRecordId, replicaLog, nextLeaderEpoch, leaderAndIsrRequests>>
+
+LOCAL BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark) ==
+    replicaState' = [replicaState EXCEPT ![replica] = 
+                         [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
+                          leader |-> leaderAndIsrRequest.leader,
+                          isr |-> leaderAndIsrRequest.isr,                                                        
+                          hw |-> newHighWatermark]]
+
+(**
+ * The only improvement here over the KIP-279 truncation logic is that we ensure that the
+ * leader and follower have the same epoch. Without it, we violate the strong ISR property
+ * when a follower uses a leader with stale state to find the truncation offset. Later
+ * the stale leader may do some truncation of its own before catching up to the follower's
+ * epoch. You can verify this failure by replacing this action with `BecomeFollowerTruncateKip279`
+ * in the spec below.
+ *)
+FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsrRequest \in leaderAndIsrRequests :
+    /\ leader # replica
+    /\ leaderAndIsrRequest.leader = leader
+    /\ leaderAndIsrRequest.leaderEpoch > replicaState[replica].leaderEpoch
+    /\  \/  /\ leader = None
+            /\ BecomeFollower(replica, leaderAndIsrRequest, replicaState[replica].hw)
+            /\ UNCHANGED replicaLog
+        \/  /\ leader # None
+            /\ ReplicaPresumesLeadership(leader)
+            /\ replicaState[leader].leaderEpoch = leaderAndIsrRequest.leaderEpoch
+            /\ LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, replica)
+                   newHighWatermark == Min({truncationOffset, replicaState[replica].hw})
+               IN  /\ ReplicaLog!TruncateTo(replica, truncationOffset)
+                   /\ BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
+    /\ UNCHANGED <<nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
+Next ==
+    \/ ControllerElectLeader 
+    \/ ControllerShrinkIsr
+    \/ BecomeLeader
+    \/ FencedLeaderExpandIsr
+    \/ FencedLeaderShrinkIsr
+    \/ LeaderWrite
+    \/ FencedLeaderIncHighWatermark 
+    \/ FencedBecomeFollowerAndTruncate
+    \/ FencedFollowerFetch
+    
+\* divij - TODO: Add a state in Next to trigger expiration
+
+
+\* In the initial state, spec is true iff, init is true AND [][Next]_vars is true in every step
+Spec == Init /\ [][Next]_vars \* Init is true in initial state AND it is always true in every state that either next is true or vars is unchanged 
+             /\ SF_vars(FencedLeaderIncHighWatermark) \* it is always eventually true that LeaderIncHighWatermark can happen and it will eventually happen with a change in vars
+             /\ SF_vars(FencedLeaderExpandIsr)
+             /\ SF_vars(LeaderWrite)
+             /\ WF_vars(FencedBecomeFollowerAndTruncate)
+             /\ WF_vars(BecomeLeader) \* it is eventually always true that BecomeLeader can happen and it will happen with a change in vars
+             
+THEOREM Spec => []TypeOk
+THEOREM Spec => []LeaderInIsr
+THEOREM Spec => []WeakIsr
+THEOREM Spec => []StrongIsr
+
 =============================================================================
 \* Modification History
+\* Last modified Mon Sep 19 18:02:02 CEST 2022 by diviv
 \* Last modified Thu Jan 02 14:37:55 PST 2020 by guozhang
 \* Last modified Mon Jul 09 14:24:02 PDT 2018 by jason
 \* Created Sun Jun 10 16:16:51 PDT 2018 by jason

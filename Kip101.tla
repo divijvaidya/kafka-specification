@@ -56,15 +56,19 @@ LOCAL Next ==
     \/ LeaderIncHighWatermark 
     \/ BecomeFollowerTruncateKip101
     \/ FollowerReplicate
-    
-LOCAL Spec == Init /\ [][Next]_vars 
-             /\ SF_vars(LeaderIncHighWatermark)
+\* divij - TODO: Add a state in Next to trigger expiration
+
+
+\* In the initial state, spec is true iff, init is true AND [][Next]_vars is true in every step
+Spec == Init /\ [][Next]_vars \* Init is true in initial state AND it is always true in every state that either next is true or vars is unchanged 
+             /\ SF_vars(LeaderIncHighWatermark) \* it is always eventually true that LeaderIncHighWatermark can happen and it will eventually happen with a change in vars
              /\ SF_vars(LeaderExpandIsr)
              /\ SF_vars(LeaderWrite)
              /\ WF_vars(BecomeFollowerTruncateKip101)
-             /\ WF_vars(BecomeLeader)
+             /\ WF_vars(BecomeLeader) \* it is eventually always true that BecomeLeader can happen and it will happen with a change in vars
 
 =============================================================================
 \* Modification History
+\* Last modified Fri Sep 16 17:28:28 CEST 2022 by diviv
 \* Last modified Mon Jul 09 00:16:30 PDT 2018 by jason
 \* Created Thu Jul 05 23:39:35 PDT 2018 by jason
