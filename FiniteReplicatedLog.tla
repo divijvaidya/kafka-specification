@@ -36,29 +36,37 @@ MaxOffset == LogSize - 1
 
 Offsets == 0 .. MaxOffset
 
-StartOffset == 0
-
-
 \*
 \* Logs is a sequence where index is replica number
 \* log = logs[replica]
 \* log is a struct:
 \*     - endOffset 
 \*     - records is a sequence where index is offset
+\*     - startOffset
 \* 
-\* 
-LOCAL LogType == [endOffset : Offsets \union {LogSize}, 
-                  records : [Offsets -> LogRecords \union {Nil}]]
+LOCAL LogType == [endOffset : Offsets \union {LogSize},
+                  records : [Offsets -> LogRecords \union {Nil}],
+                  startOffset : Offsets \union {LogSize}]
+                  
 LOCAL EmptyLog == [endOffset |-> 0, 
+                   startOffset |-> 0,
                    records |-> [offset \in Offsets |-> Nil]]
 
 IsEmpty(replica) == logs[replica].endOffset = 0
 
 IsFull(replica) == logs[replica].endOffset = LogSize
 
+
+\* diviv - TODO - HasEntry should add offset > log.globalStartOffset
 HasEntry(replica, record, offset) == LET log == logs[replica] IN
     /\ offset < log.endOffset
+    /\ offset >= log.startOffset
     /\ log.records[offset] = record
+
+\* diviv - TODO - HasLocalEntry should add offset > log.localstartOffset
+HasLocalEntry(replica, record, offset) == LET log == logs[replica] IN
+    /\ HasEntry(replica, record, offset)
+    /\ offset < log.localStartOffset
 
 IsLatestEntry(replica, record, offset) == LET log == logs[replica] IN
     /\ ~ IsEmpty(replica)
@@ -78,30 +86,32 @@ IsEndOffset(replica, offset) == logs[replica].endOffset = offset
 
 GetRecordAtOffset(replica, offset) == logs[replica].records[offset]
 
-GetAllEntries(replica) == LET log == logs[replica] IN
-    IF log.endOffset = 0
-    THEN {}
-    ELSE {[offset |-> offset, 
-           record |-> GetRecordAtOffset(replica, offset)] : offset \in 0 .. (log.endOffset - 1)}
-
-HasOffset(replica, offset) == offset < logs[replica].endOffset
+HasOffset(replica, offset) == 
+    /\ offset < logs[replica].endOffset
+    /\ offset >= logs[replica].startOffset
 
 LOCAL GetWrittenOffsets(replica) == 
     IF IsEmpty(replica)
     THEN {}
-    ELSE 0 .. (logs[replica].endOffset - 1)
+    ELSE logs[replica].startOffset .. (logs[replica].endOffset - 1)
 
 LOCAL GetUnwrittenOffsets(replica) ==
     IF IsFull(replica)
     THEN {}
     ELSE logs[replica].endOffset .. MaxOffset
     
+GetAllEntries(replica) == LET log == logs[replica] IN
+    IF log.endOffset = 0
+    THEN {}
+    ELSE {[offset |-> offset, 
+           record |-> GetRecordAtOffset(replica, offset)] : offset \in GetWrittenOffsets(replica)}
+    
 LOCAL ReplicaLogTypeOk(replica) == LET log == logs[replica] IN
     /\ log \in LogType
     /\ \A offset \in GetWrittenOffsets(replica) : log.records[offset] \in LogRecords
-    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = Nil
+    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] # Nil
     /\ GetEndOffset(replica) >= log.startOffset
-
+    
 TypeOk == \A replica \in Replicas : ReplicaLogTypeOk(replica)
 
 Init == logs = [replica \in Replicas |-> EmptyLog]
@@ -117,16 +127,25 @@ TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
     /\ logs' = [logs EXCEPT 
         ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE Nil], 
         ![replica].endOffset = newEndOffset]
-        
-\* diviv - TODO - Add new function: Expire which changes the startOffset
 
+TruncateFromStart(replica, newStartOffset) == LET log == logs[replica] IN
+    /\ newStartOffset \geq log.startOffset
+    /\ logs' = [logs EXCEPT 
+        ![replica].records = [offset \in Offsets |-> IF offset > newStartOffset THEN @[offset] ELSE Nil], 
+        ![replica].startOffset = newStartOffset]
+    
+
+\* diviv - TODO - HasEntry should be changed HasLocalEntry 
 ReplicateTo(fromReplica, toReplica) == \E offset \in Offsets, record \in LogRecords :
     /\ HasEntry(fromReplica, record, offset)
     /\ Append(toReplica, record, offset)
 
+\* diviv - TODO - add replicate to TS log
+
 Next == \E replica \in Replicas :
     \/ \E record \in LogRecords, offset \in Offsets : Append(replica, record, offset)
     \/ \E offset \in Offsets : TruncateTo(replica, offset)
+    \/ \E offset \in Offsets : TruncateFromStart(replica, offset)
     \/ \E otherReplica \in Replicas \ {replica} : ReplicateTo(replica, otherReplica)
         
 Spec == Init /\ [][Next]_logs
@@ -134,6 +153,6 @@ Spec == Init /\ [][Next]_logs
 THEOREM Spec => []TypeOk
 =============================================================================
 \* Modification History
-\* Last modified Fri Sep 16 11:13:38 CEST 2022 by diviv
+\* Last modified Thu Sep 29 14:52:37 CEST 2022 by diviv
 \* Last modified Mon Jul 09 14:23:51 PDT 2018 by jason
 \* Created Sat Jun 23 13:24:52 PDT 2018 by jason
