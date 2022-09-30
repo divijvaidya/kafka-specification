@@ -92,7 +92,7 @@ HasOffset(replica, offset) ==
     /\ offset < logs[replica].endOffset
     /\ offset >= logs[replica].startOffset
 
-LOCAL GetWrittenOffsets(replica) == 
+GetWrittenOffsets(replica) == 
     IF IsEmpty(replica)
     THEN {}
     ELSE logs[replica].startOffset .. (logs[replica].endOffset - 1)
@@ -145,13 +145,13 @@ ReplicateTo(fromReplica, toReplica) == \E offset \in Offsets, record \in LogReco
     /\ Append(toReplica, record, offset)
 
 
-Next == \E replica \in Replicas :
+LOCAL Next == \E replica \in Replicas :
     \/ \E record \in LogRecords, offset \in Offsets : Append(replica, record, offset)
     \/ \E offset \in Offsets : TruncateTo(replica, offset)
-    \/ \E offset \in Offsets : TruncateFromStart(replica, offset)
+    \/ \E offset \in Offsets : TruncateFullyAndStartAt(replica, offset)
     \/ \E otherReplica \in Replicas \ {replica} : ReplicateTo(replica, otherReplica)
         
-Spec == Init /\ [][Next]_logs
+LOCAL Spec == Init /\ [][Next]_logs
 
 THEOREM Spec => []TypeOk
 =============================================================================

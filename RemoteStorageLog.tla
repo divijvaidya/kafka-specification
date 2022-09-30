@@ -1,13 +1,15 @@
 ------------------------ MODULE RemoteStorageLog ------------------------
+EXTENDS Integers
 
 CONSTANTS 
     LogRecords, 
-    LogSize
-    MaxEpoch
+    LogSize,
+    MaxLeaderEpoch,
+    Nil
 
 ASSUME 
     /\ LogSize \in Nat 
-    /\ MaxEpoch \in Nat
+    /\ MaxLeaderEpoch \in Nat
 
 MaxOffset == LogSize - 1
 
@@ -33,8 +35,9 @@ GetEndOffset == remoteLog.endOffset
     
 
 Append(record, offset) == 
-    /\ offset = log.endOffset
-    /\ remoteLog' = [remoteLog EXCEPT !remoteLog.records[offset] = record, !remoteLog.endOffset = @ + 1]
+    /\ offset = remoteLog.endOffset
+    /\ remoteLog' = [remoteLog EXCEPT ![remoteLog].records[offset] = record, 
+                                      ![remoteLog].endOffset = @ + 1]
 
 TypeOk == 
     /\ remoteLog \in LogType

@@ -1,21 +1,26 @@
 ------------------------------- MODULE Kip405 -------------------------------
 EXTENDS KafkaReplication
 
+LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
 
 LeaderDataExpireKIP405 == \E leader \in Replicas :
     /\ leader # None
     /\ ReplicaPresumesLeadership(leader)
-    /\ \E tillOffset \in GetWrittenOffsets(leader) :
-        /\ RemoteLog!GetEndOffset() > ReplicaLog!GetStartOffset(leader) 
-        /\ ReplicaLog!TruncateFromStart(leader, tillOffset)
+    /\ \E tillOffset \in ReplicaLog!GetWrittenOffsets(leader) :
+        /\ RemoteLog!GetEndOffset > ReplicaLog!GetStartOffset(leader) 
+        /\ ReplicaLog!TruncateFullyAndStartAt(leader, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 FencedFollowerFetchKIP405 == \E follower, leader \in Replicas :
     /\ IsFollowingLeaderEpoch(leader, follower)
-    /\ ReplicaLog!GetStartOffset()[follower].startOffset
-
-
-LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
+    \* Followers can only enter the fetch state when their end offset >= leader's local log start offset
+    /\ ReplicaLog!GetEndOffset(follower) >= GetLocalLogStartOffset(leader)
+    /\ ReplicaLog!ReplicateTo(leader, follower)
+    /\ LET  newEndOffset == ReplicaLog!GetEndOffset(follower) + 1
+            leaderHw == replicaState[leader].hw
+            followerHw == Min({leaderHw, newEndOffset})
+       IN   replicaState' = [replicaState EXCEPT ![follower].hw = followerHw]
+    /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
  * Entry criteria for this state: follower's endOffset < leader's local start offset
@@ -34,12 +39,12 @@ LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
 
 FollowerBuildAuxState == \E leader, follower \in Replicas :
     /\ leader # None
-    /\ leader # replica
+    /\ leader # follower
     /\ ReplicaPresumesLeadership(leader)
     \* This is the enabling condition for going into BuildAux state
     /\ ReplicaLog!GetEndOffset(follower) < GetLocalLogStartOffset(leader)
     \* Truncate from start till leader's local log start offset
-    \* This also updates the start offset of the
+    \* This also updates the start offset & end offset of the follower
     /\ ReplicaLog!TruncateFullyAndStartAt(follower, GetLocalLogStartOffset(leader))
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
@@ -67,4 +72,5 @@ Spec == Init /\ [][Next]_vars
 THEOREM Spec => []TypeOk
 =============================================================================
 \* Modification History
+\* Last modified Fri Sep 30 15:32:31 CEST 2022 by diviv
 \* Created Wed Sep 14 15:39:13 CEST 2022 by diviv

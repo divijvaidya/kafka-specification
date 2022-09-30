@@ -107,7 +107,7 @@ ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize},
                  leaderEpoch: LeaderEpochOpt,
                  leader : ReplicaOpt, 
                  isr: SUBSET Replicas
-                 globalLogStart: ] \* diviv TODO
+                ]
 
 TypeOk ==
     /\ LeaderEpochSeq!TypeOk
@@ -123,7 +123,7 @@ Init ==
     /\ RecordSeq!Init
     /\ ReplicaLog!Init
     /\ RemoteLog!Init
-    /\ replicaState = [replica \in Replicas |-> [hw |-> ReplicaLog!StartOffset, 
+    /\ replicaState = [replica \in Replicas |-> [hw |-> ReplicaLog!GetStartOffset(replica), 
                                                  leaderEpoch |-> Nil, 
                                                  leader |-> None, 
                                                  isr |-> {}]]
@@ -143,6 +143,9 @@ IsTrueLeader(leader) ==
     /\ ReplicaPresumesLeadership(leader)
     /\ replicaState[leader].leaderEpoch = quorumState.leaderEpoch
 
+
+ \* diviv TODO
+ \* GlobalLogStartOffset == RemoteLog!GetStartOffset()
 
 (**
  * Helper function to "send" a new LeaderAndIsr request. The leader epoch is bumped,
@@ -386,7 +389,7 @@ LeaderInIsr == quorumState.leader \in quorumState.isr
 LOCAL IsFollowerIsrEligible(follower) == TRUE
      
 
-LOCAL IsFollowingLeaderEpoch(leader, follower) == 
+IsFollowingLeaderEpoch(leader, follower) == 
     /\ ReplicaPresumesLeadership(leader)
     /\ replicaState[follower].leader = leader
     /\ replicaState[follower].leaderEpoch = replicaState[leader].leaderEpoch
@@ -485,7 +488,6 @@ LOCAL BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark) ==
  * epoch. You can verify this failure by replacing this action with `BecomeFollowerTruncateKip279`
  * in the spec below.
  * 
- * diviv - this should remain unchanged for TS.
  *)
 FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsrRequest \in leaderAndIsrRequests :
     /\ leader # replica
@@ -524,14 +526,14 @@ FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsr
 LeaderDataExpire == \E leader \in Replicas :
     /\ leader # None
     /\ ReplicaPresumesLeadership(leader)
-    /\ \E tillOffset \in GetWrittenOffsets(leader) :
+    /\ \E tillOffset \in ReplicaLog!GetWrittenOffsets(leader) :
         /\ ReplicaLog!TruncateFullyAndStartAt(leader, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 
 \* Create a state without log tracked.
 
-Next ==
+LOCAL Next ==
     \/ ControllerElectLeader 
     \/ ControllerShrinkIsr
     \/ BecomeLeader
@@ -547,7 +549,7 @@ Next ==
 
 
 \* In the initial state, spec is true iff, init is true AND [][Next]_vars is true in every step
-Spec == Init /\ [][Next]_vars \* Init is true in initial state AND it is always true in every state that either next is true or vars is unchanged 
+LOCAL Spec == Init /\ [][Next]_vars \* Init is true in initial state AND it is always true in every state that either next is true or vars is unchanged 
              /\ SF_vars(FencedLeaderIncHighWatermark) \* it is always eventually true that LeaderIncHighWatermark can happen and it will eventually happen with a change in vars
              /\ SF_vars(FencedLeaderExpandIsr)
              /\ SF_vars(LeaderWrite)
