@@ -80,7 +80,9 @@ GetLatestRecord(replica) == LET log == logs[replica] IN
 
 IsLatestRecord(replica, record) == \E offset \in Offsets : IsLatestEntry(replica, record, offset)
 
-GetEndOffset(replica) == logs[replica].endOffset 
+GetEndOffset(replica) == logs[replica].endOffset
+
+GetStartOffset(replica) == logs[replica].startOffset
 
 IsEndOffset(replica, offset) == logs[replica].endOffset = offset 
 
@@ -109,7 +111,7 @@ GetAllEntries(replica) == LET log == logs[replica] IN
 LOCAL ReplicaLogTypeOk(replica) == LET log == logs[replica] IN
     /\ log \in LogType
     /\ \A offset \in GetWrittenOffsets(replica) : log.records[offset] \in LogRecords
-    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] # Nil
+    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = Nil
     /\ GetEndOffset(replica) >= log.startOffset
     
 TypeOk == \A replica \in Replicas : ReplicaLogTypeOk(replica)
@@ -128,11 +130,13 @@ TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
         ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE Nil], 
         ![replica].endOffset = newEndOffset]
 
-TruncateFromStart(replica, newStartOffset) == LET log == logs[replica] IN
+TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
     /\ newStartOffset \geq log.startOffset
     /\ logs' = [logs EXCEPT 
-        ![replica].records = [offset \in Offsets |-> IF offset > newStartOffset THEN @[offset] ELSE Nil], 
-        ![replica].startOffset = newStartOffset]
+        \* Empty all data from the logs
+        ![replica].records = [offset \in Offsets |-> Nil], 
+        ![replica].startOffset = newStartOffset,
+        ![replica].endOffset = newStartOffset]
     
 
 \* diviv - TODO - HasEntry should be changed HasLocalEntry 
@@ -140,7 +144,6 @@ ReplicateTo(fromReplica, toReplica) == \E offset \in Offsets, record \in LogReco
     /\ HasEntry(fromReplica, record, offset)
     /\ Append(toReplica, record, offset)
 
-\* diviv - TODO - add replicate to TS log
 
 Next == \E replica \in Replicas :
     \/ \E record \in LogRecords, offset \in Offsets : Append(replica, record, offset)
