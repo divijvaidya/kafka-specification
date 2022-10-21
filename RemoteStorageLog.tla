@@ -5,7 +5,7 @@ CONSTANTS
     LogRecords, 
     LogSize,
     MaxLeaderEpoch,
-    Nil
+    NilRecord
 
 ASSUME 
     /\ LogSize \in Nat 
@@ -23,28 +23,28 @@ LOCAL EpochType == [startOffset : 0..MaxOffset,
                     endOffset :  0..LogSize]
 
 LOCAL LogType == [endOffset : Offsets \union {LogSize},
-                  records : [Offsets -> LogRecords \union {Nil}],
+                  records : [Offsets -> LogRecords \union {NilRecord}],
                   startOffset : Offsets \union {LogSize}]
-
+                  
 LOCAL EmptyLog == [endOffset |-> 0, 
                    startOffset |-> 0,
-                   records |-> [offset \in Offsets |-> Nil]]
+                   records |-> [offset \in Offsets |-> NilRecord]]
 
 GetStartOffset == remoteLog.startOffset
 GetEndOffset == remoteLog.endOffset
     
-
 Append(record, offset) == 
-    /\ offset = remoteLog.endOffset
-    /\ remoteLog' = [remoteLog EXCEPT ![remoteLog].records[offset] = record, 
-                                      ![remoteLog].endOffset = @ + 1]
-
+    \* /\ offset = remoteLog.endOffset
+    \* /\ remoteLog' = [remoteLog EXCEPT ![records] = [offset] = record, 
+    \*                                   !endOffset = @ + 1]
+    /\ remoteLog' = [endOffset |-> remoteLog.endOffset + 1, 
+                     startOffset |-> remoteLog.startOffset,
+                     records |-> [remoteLog.records EXCEPT ![offset] = record]]
 TypeOk == 
     /\ remoteLog \in LogType
-    /\ remoteLog.endOffset >= remoteLog.startOffset
+    /\ GetEndOffset >= GetStartOffset
 
-Init == (* Global variables *)
-    /\ remoteLog = EmptyLog
+Init == remoteLog = EmptyLog
 
 Next == \E record \in LogRecords, offset \in Offsets : Append(record, offset)
 

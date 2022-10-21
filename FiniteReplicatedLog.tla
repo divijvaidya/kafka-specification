@@ -17,12 +17,12 @@
  
 ------------------------ MODULE FiniteReplicatedLog ------------------------
 
-EXTENDS Integers
+EXTENDS Integers, TLC
 
 CONSTANTS 
     Replicas, 
     LogRecords, 
-    Nil, 
+    NilRecord, 
     LogSize
 
 (*
@@ -45,12 +45,12 @@ Offsets == 0 .. MaxOffset
 \*     - startOffset
 \* 
 LOCAL LogType == [endOffset : Offsets \union {LogSize},
-                  records : [Offsets -> LogRecords \union {Nil}],
+                  records : [Offsets -> LogRecords \union {NilRecord}],
                   startOffset : Offsets \union {LogSize}]
                   
 LOCAL EmptyLog == [endOffset |-> 0, 
                    startOffset |-> 0,
-                   records |-> [offset \in Offsets |-> Nil]]
+                   records |-> [offset \in Offsets |-> [id : -1, epoch : -1]]]
 
 IsEmpty(replica) == logs[replica].endOffset = 0
 
@@ -75,7 +75,7 @@ IsLatestEntry(replica, record, offset) == LET log == logs[replica] IN
 
 GetLatestRecord(replica) == LET log == logs[replica] IN 
     IF IsEmpty(replica) 
-    THEN Nil 
+    THEN NilRecord 
     ELSE log.records[log.endOffset - 1]
 
 IsLatestRecord(replica, record) == \E offset \in Offsets : IsLatestEntry(replica, record, offset)
@@ -95,7 +95,7 @@ HasOffset(replica, offset) ==
 GetWrittenOffsets(replica) == 
     IF IsEmpty(replica)
     THEN {}
-    ELSE logs[replica].startOffset .. (logs[replica].endOffset - 1)
+    ELSE logs[replica].startOffset .. (logs[replica].endOffset - 1) \* tillOffset should be till high water
 
 LOCAL GetUnwrittenOffsets(replica) ==
     IF IsFull(replica)
@@ -109,10 +109,12 @@ GetAllEntries(replica) == LET log == logs[replica] IN
            record |-> GetRecordAtOffset(replica, offset)] : offset \in GetWrittenOffsets(replica)}
     
 LOCAL ReplicaLogTypeOk(replica) == LET log == logs[replica] IN
+    /\ Print(<<"inside replicaLogTypeOk:log ", log>>, TRUE)
+    /\ Print(<<"inside replicaLogTypeOk:LogType", LogRecords>>, TRUE)
     /\ log \in LogType
-    /\ \A offset \in GetWrittenOffsets(replica) : log.records[offset] \in LogRecords
-    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = Nil
-    /\ GetEndOffset(replica) >= log.startOffset
+\*    /\ \A offset \in GetWrittenOffsets(replica) : log.records[offset] \in LogRecords
+\*    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = Nil
+    \* /\ GetEndOffset(replica) >= GetStartOffset(replica)
     
 TypeOk == \A replica \in Replicas : ReplicaLogTypeOk(replica)
 
@@ -127,23 +129,29 @@ Append(replica, record, offset) == LET log == logs[replica] IN
 TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
     /\ newEndOffset \leq log.endOffset
     /\ logs' = [logs EXCEPT 
-        ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE Nil], 
+        ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE NilRecord], 
         ![replica].endOffset = newEndOffset]
 
-TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
+TruncateFullyAndStartAt2(replica, newStartOffset) == LET log == logs[replica] IN
     /\ newStartOffset \geq log.startOffset
     /\ logs' = [logs EXCEPT 
         \* Empty all data from the logs
-        ![replica].records = [offset \in Offsets |-> Nil], 
+        ![replica].records = [offset \in Offsets |-> NilRecord],  \* TODO - 
         ![replica].startOffset = newStartOffset,
         ![replica].endOffset = newStartOffset]
+
+TruncateFullyAndStartAt(replica, tillOffset) == LET log == logs[replica] IN
+    /\ tillOffset \geq log.startOffset
+    /\ logs' = [logs EXCEPT 
+        \* Empty all data from the logs
+        ![replica].records = [offset \in Offsets |-> IF offset > tillOffset THEN @[offset] ELSE NilRecord], 
+        ![replica].startOffset = tillOffset + 1]
     
 
 \* diviv - TODO - HasEntry should be changed HasLocalEntry 
 ReplicateTo(fromReplica, toReplica) == \E offset \in Offsets, record \in LogRecords :
     /\ HasEntry(fromReplica, record, offset)
     /\ Append(toReplica, record, offset)
-
 
 LOCAL Next == \E replica \in Replicas :
     \/ \E record \in LogRecords, offset \in Offsets : Append(replica, record, offset)
@@ -156,6 +164,6 @@ LOCAL Spec == Init /\ [][Next]_logs
 THEOREM Spec => []TypeOk
 =============================================================================
 \* Modification History
-\* Last modified Thu Sep 29 14:52:37 CEST 2022 by diviv
+\* Last modified Fri Oct 21 07:42:34 PDT 2022 by diviv
 \* Last modified Mon Jul 09 14:23:51 PDT 2018 by jason
 \* Created Sat Jun 23 13:24:52 PDT 2018 by jason

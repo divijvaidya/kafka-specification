@@ -37,6 +37,7 @@ CONSTANTS
     MaxLeaderEpoch
 
 None == "NONE"
+NilRecord == [id : -1, epoch : -1] 
 Nil == -1
 
 \* divij - the inputs defined in constants must satisfy the validations available in assume
@@ -49,7 +50,7 @@ VARIABLES
     \* This is a function from the replicas to their local logs.  
     replicaLog,
 
-    \* This is a function from the replicas to their remote logs.  
+    \* This represents remote logs for a topic.  
     remoteLog,
 
     \* This is a function from the replicas to their local state. The replica state contains 
@@ -131,6 +132,9 @@ Init ==
                       leader |-> None, 
                       isr |-> Replicas]
     /\ leaderAndIsrRequests = {}
+
+
+GetHighWatermark(replica) == replicaState[replica].hw
 
 (**
  * Check whether a broker believes itself to be the leader. The presumed leader will accept
@@ -402,14 +406,14 @@ IsFollowingLeaderEpoch(leader, follower) ==
  * diviv - todo - followers can only fetch the "local data" from the leader 
  *)
 \*
-FencedFollowerFetch == \E follower, leader \in Replicas :
+FencedFollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniing locally to the replica cannot be dependent on / conditional on states or change states which are not local to the leader
     /\ IsFollowingLeaderEpoch(leader, follower)
     /\ ReplicaLog!ReplicateTo(leader, follower)
     /\ LET  newEndOffset == ReplicaLog!GetEndOffset(follower) + 1
             leaderHw == replicaState[leader].hw
             followerHw == Min({leaderHw, newEndOffset})
        IN   replicaState' = [replicaState EXCEPT ![follower].hw = followerHw]
-    /\ UNCHANGED <<nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+    /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
  * The high watermark is advanced if all members of the ISR are following the leader's
@@ -480,6 +484,8 @@ LOCAL BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark) ==
                           isr |-> leaderAndIsrRequest.isr,                                                        
                           hw |-> newHighWatermark]]
 
+
+
 (**
  * The only improvement here over the KIP-279 truncation logic is that we ensure that the
  * leader and follower have the same epoch. Without it, we violate the strong ISR property
@@ -504,15 +510,13 @@ FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsr
                IN  /\ ReplicaLog!TruncateTo(replica, truncationOffset)
                    /\ BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
-     
 
-\* diviv - todo - build a LeaderArchiveToRemoteStorage state
-\* end offset of TS for a particular epoch chain <= hw (last stable offset) of leader
-\* 
-\* LeaderArchiveToRemoteStorage == \E leader \in Replicas :
-\*     /\ leader # None
-\*     /\ ReplicaPresumesLeadership(leader)
-\*     /\ ReplicaLog!ReplicateToLog(remoteLog)
+LOCAL GetHw(replica) == replicaState[replica].hw
+
+GetCommittedOffsets(replica) ==
+    IF ReplicaLog!IsEmpty(replica)
+    THEN {}
+    ELSE ReplicaLog!GetStartOffset(replica) .. GetHw(replica)
 
 
 \* diviv - todo Add state LeaderDataEviction
@@ -523,11 +527,9 @@ FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsr
 
 \* do we expire the epoch history too?
 \* do we expire for all replicas instead of just the leader? (yes)
-LeaderDataExpire == \E leader \in Replicas :
-    /\ leader # None
-    /\ ReplicaPresumesLeadership(leader)
-    /\ \E tillOffset \in ReplicaLog!GetWrittenOffsets(leader) :
-        /\ ReplicaLog!TruncateFullyAndStartAt(leader, tillOffset)
+LeaderDataExpire == \E replica \in Replicas :
+    /\ \E tillOffset \in GetCommittedOffsets(replica) :
+        /\ ReplicaLog!TruncateFullyAndStartAt(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 
@@ -563,7 +565,7 @@ THEOREM Spec => []StrongIsr
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Sep 27 12:00:19 CEST 2022 by diviv
+\* Last modified Thu Oct 20 09:38:17 PDT 2022 by diviv
 \* Last modified Thu Jan 02 14:37:55 PST 2020 by guozhang
 \* Last modified Mon Jul 09 14:24:02 PDT 2018 by jason
 \* Created Sun Jun 10 16:16:51 PDT 2018 by jason
