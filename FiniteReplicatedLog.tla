@@ -50,7 +50,8 @@ LOCAL LogType == [endOffset : Offsets \union {LogSize},
                   
 LOCAL EmptyLog == [endOffset |-> 0, 
                    startOffset |-> 0,
-                   records |-> [offset \in Offsets |-> [id : -1, epoch : -1]]]
+                   records |-> [offset \in Offsets |-> [id |-> -1, 
+                                                        epoch |-> -1]]]
 
 IsEmpty(replica) == logs[replica].endOffset = 0
 
@@ -136,15 +137,20 @@ TruncateFullyAndStartAt2(replica, newStartOffset) == LET log == logs[replica] IN
     /\ newStartOffset \geq log.startOffset
     /\ logs' = [logs EXCEPT 
         \* Empty all data from the logs
-        ![replica].records = [offset \in Offsets |-> NilRecord],  \* TODO - 
+        ![replica].records = [offset \in Offsets |-> [id |-> -1, 
+                                                    epoch |-> -1]],  \* TODO - 
         ![replica].startOffset = newStartOffset,
         ![replica].endOffset = newStartOffset]
 
+\* We don't need to update end offset because it is guaranteed that end offset will remain unchanged due to
+\* the enabling condition /\ tillOffset < log.endOffset
 TruncateFullyAndStartAt(replica, tillOffset) == LET log == logs[replica] IN
     /\ tillOffset \geq log.startOffset
+    /\ tillOffset < log.endOffset
     /\ logs' = [logs EXCEPT 
         \* Empty all data from the logs
-        ![replica].records = [offset \in Offsets |-> IF offset > tillOffset THEN @[offset] ELSE NilRecord], 
+        ![replica].records = [offset \in Offsets |-> IF offset > tillOffset THEN @[offset] ELSE [id |-> -1, 
+                                                                                                 epoch |-> -1]], 
         ![replica].startOffset = tillOffset + 1]
     
 

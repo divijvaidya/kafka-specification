@@ -26,12 +26,16 @@ LOCAL LogType == [endOffset : Offsets \union {LogSize},
                   records : [Offsets -> LogRecords \union {NilRecord}],
                   startOffset : Offsets \union {LogSize}]
                   
-LOCAL EmptyLog == [endOffset |-> 0, 
+LOCAL EmptyLog == [endOffset |-> 0,
                    startOffset |-> 0,
-                   records |-> [offset \in Offsets |-> NilRecord]]
+                   records |-> [offset \in Offsets |-> [id |-> -1, 
+                                                        epoch |-> -1]]]
 
 GetStartOffset == remoteLog.startOffset
 GetEndOffset == remoteLog.endOffset
+GetRemoteOffsetRange == GetStartOffset..GetEndOffset-1
+
+IsEmpty == remoteLog.endOffset = 0
     
 Append(record, offset) == 
     \* /\ offset = remoteLog.endOffset

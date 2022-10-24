@@ -5,12 +5,10 @@ EXTENDS KafkaReplication, TLC
 LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
 LOCAL GetGlobalLogStartOffset == RemoteLog!GetStartOffset
 
-
-LeaderDataExpireKIP405 ==
-    /\ LET highestRemoteOffset == RemoteLog!GetEndOffset - 1 IN \E replica \in Replicas: 
-        /\ \E tillOffset \in 0..highestRemoteOffset:
-            /\ Print(<<"inside offsets", tillOffset>>, TRUE)
-            /\ RemoteLog!GetEndOffset > tillOffset
+\* TODO - Change the name of state from LeaderDataExpireKIP405 to ReplicaDataExpireKIP405
+LeaderDataExpireKIP405 == \E replica \in Replicas:
+        /\ ~RemoteLog!IsEmpty \* Only enable this state is remote log is non-empty
+        /\ \E tillOffset \in RemoteLog!GetRemoteOffsetRange:
             /\ ReplicaLog!TruncateFullyAndStartAt(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 

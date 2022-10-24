@@ -37,7 +37,7 @@ CONSTANTS
     MaxLeaderEpoch
 
 None == "NONE"
-NilRecord == [id : -1, epoch : -1] 
+NilRecord == [id |-> -1, epoch |-> -1] 
 Nil == -1
 
 \* divij - the inputs defined in constants must satisfy the validations available in assume
