@@ -118,6 +118,8 @@ TypeOk ==
     /\ replicaState \in [Replicas -> ReplicaState]
     /\ quorumState \in QuorumState
     /\ leaderAndIsrRequests \subseteq QuorumState
+    /\ \A replica \in Replicas:
+        /\ ~ReplicaLog!IsEmpty(replica) => replicaState[replica].hw < ReplicaLog!GetEndOffset(replica) 
 
 Init ==
     /\ LeaderEpochSeq!Init
@@ -399,7 +401,7 @@ IsFollowingLeaderEpoch(leader, follower) ==
 
 NoSplitBrain(leader) ==
     /\ \A replica \in Replicas:
-        /\ replicaState[replica] # None
+        /\ replicaState[replica].leader # None
         /\ IsFollowingLeaderEpoch(leader, replica)
 (**
  * Followers can fetch as long as they have the same epoch as the leader. Prior to fetching,
@@ -424,12 +426,12 @@ FencedFollowerFetch == \E follower, leader \in Replicas : \* TODO - anything hap
  * on the leader's local ISR and not the quorum.
  *)
 FencedLeaderIncHighWatermark == \E leader \in Replicas :
-    /\ LET leaderHw == replicaState[leader].hw 
-       IN  /\ ReplicaLog!HasOffset(leader, leaderHw)
+    /\ LET newLeaderHw == IF replicaState[leader].hw = 0 THEN 0 ELSE replicaState[leader].hw + 1
+       IN  /\ ReplicaLog!HasOffset(leader, newLeaderHw)
            /\ \A follower \in replicaState[leader].isr : 
               /\ IsFollowingLeaderEpoch(leader, follower)
-              /\ ReplicaLog!HasOffset(follower, leaderHw)
-    /\ replicaState' = [replicaState EXCEPT ![leader].hw = @ + 1]
+              /\ ReplicaLog!HasOffset(follower, newLeaderHw)
+    /\ replicaState' = [replicaState EXCEPT ![leader].hw = IF replicaState[leader].hw = 0 THEN 0 ELSE @ + 1]
     /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
@@ -566,6 +568,7 @@ THEOREM Spec => []StrongIsr
 
 =============================================================================
 \* Modification History
+\* Last modified Tue Oct 25 16:16:28 UTC 2022 by ec2-user
 \* Last modified Thu Oct 20 09:38:17 PDT 2022 by diviv
 \* Last modified Thu Jan 02 14:37:55 PST 2020 by guozhang
 \* Last modified Mon Jul 09 14:24:02 PDT 2018 by jason

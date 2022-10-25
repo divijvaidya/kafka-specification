@@ -1,5 +1,4 @@
 ------------------------------- MODULE Kip405 -------------------------------
-\* If outage happens in S3, it is on path to leader re-election. But we asume that S3 availability. 
 EXTENDS KafkaReplication, TLC
 
 LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
@@ -53,16 +52,17 @@ FollowerBuildAuxState == \E leader, follower \in Replicas :
 \* 
 LeaderArchiveToRemoteStorage == \E leader \in Replicas :
     /\ ReplicaPresumesLeadership(leader)
-    /\ \E uploadOffset \in RemoteLog!GetEndOffset..GetHighwatermark(leader):
+    /\ \E uploadOffset \in RemoteLog!GetEndOffset..GetHighWatermark(leader):
         /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, uploadOffset), uploadOffset)
     /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (** 
  * Invariant to test the continuity of the logs
+ * TODO - Add invaraint that the epoch for latest remote offset is part of leader chain
  *)
-LogContinuityOk == \E replica \in Replicas :
-    \* There are no holes in the log
-    /\ RemoteLog!GetEndOffset >= ReplicaLog!GetStartOffset(replica)
+LogContinuityOk == \E leader \in Replicas :
+    \* There are no holes in the log when compared to true leader
+    /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset >= ReplicaLog!GetStartOffset(leader) 
 
 (**
  * Uncommitted offsets on a leader cannot be moved to Remote Storage
@@ -71,9 +71,15 @@ LogContinuityOk == \E replica \in Replicas :
  *)
 LogArchiveOk == \E leader \in Replicas :
     /\ NoSplitBrain(leader) => RemoteLog!GetEndOffset < GetHighWatermark(leader)
-    
-TestLeaderLogNotExpire == ~\E replica \in Replicas :
-    ReplicaLog!GetStartOffset(replica) = 2
+
+TestLeaderLogNotExpire == 
+    /\ \E leader \in Replicas:
+            /\ IsTrueLeader(leader)
+            /\ ReplicaLog!GetStartOffset(leader) = 1
+            /\ \A replica \in Replicas:
+                /\ IsFollowingLeaderEpoch(replica, leader)
+    => /\ \A replica \in Replicas :
+           /\ ReplicaLog!GetStartOffset(replica) < 1
 
 TestLeaderNotIncrementingHw == \A replica \in Replicas :
     replicaState[replica].hw = 0
@@ -99,8 +105,9 @@ Spec == Init /\ [][Next]_vars
              /\ WF_vars(FencedBecomeFollowerAndTruncate)
              /\ WF_vars(BecomeLeader)
 
-\* THEOREM Spec => []TypeOk
+THEOREM Spec => []TypeOk
 =============================================================================
 \* Modification History
+\* Last modified Tue Oct 25 15:29:03 UTC 2022 by ec2-user
 \* Last modified Thu Oct 20 10:04:24 PDT 2022 by diviv
 \* Created Wed Sep 14 15:39:13 CEST 2022 by diviv

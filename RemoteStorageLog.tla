@@ -35,11 +35,16 @@ GetEndOffset == remoteLog.endOffset
 GetRemoteOffsetRange == GetStartOffset..GetEndOffset-1
 
 IsEmpty == remoteLog.endOffset = 0
+
+GetLatestRecord == 
+    /\ IF IsEmpty 
+       THEN NilRecord 
+       ELSE remoteLog.records[remoteLog.endOffset - 1]
     
 Append(record, offset) == 
     \* /\ offset = remoteLog.endOffset
-    \* /\ remoteLog' = [remoteLog EXCEPT ![records] = [offset] = record, 
-    \*                                   !endOffset = @ + 1]
+\*     /\ remoteLog' = [remoteLog EXCEPT ![records] = [offset] = record, 
+\*                                       !endOffset = @ + 1]
     /\ remoteLog' = [endOffset |-> remoteLog.endOffset + 1, 
                      startOffset |-> remoteLog.startOffset,
                      records |-> [remoteLog.records EXCEPT ![offset] = record]]
