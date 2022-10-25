@@ -28,8 +28,7 @@ LOCAL LogType == [endOffset : Offsets \union {LogSize},
                   
 LOCAL EmptyLog == [endOffset |-> 0,
                    startOffset |-> 0,
-                   records |-> [offset \in Offsets |-> [id |-> -1, 
-                                                        epoch |-> -1]]]
+                   records |-> [offset \in Offsets |-> NilRecord]]
 
 GetStartOffset == remoteLog.startOffset
 GetEndOffset == remoteLog.endOffset

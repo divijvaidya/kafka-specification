@@ -110,12 +110,10 @@ GetAllEntries(replica) == LET log == logs[replica] IN
            record |-> GetRecordAtOffset(replica, offset)] : offset \in GetWrittenOffsets(replica)}
     
 LOCAL ReplicaLogTypeOk(replica) == LET log == logs[replica] IN
-    /\ Print(<<"inside replicaLogTypeOk:log ", log>>, TRUE)
-    /\ Print(<<"inside replicaLogTypeOk:LogType", LogRecords>>, TRUE)
     /\ log \in LogType
-\*    /\ \A offset \in GetWrittenOffsets(replica) : log.records[offset] \in LogRecords
-\*    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = Nil
-    \* /\ GetEndOffset(replica) >= GetStartOffset(replica)
+    /\ \A offset \in GetWrittenOffsets(replica) : log.records[offset] \in LogRecords
+    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = Nil
+    /\ GetEndOffset(replica) >= GetStartOffset(replica)
     
 TypeOk == \A replica \in Replicas : ReplicaLogTypeOk(replica)
 
@@ -131,26 +129,25 @@ TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
     /\ newEndOffset \leq log.endOffset
     /\ logs' = [logs EXCEPT 
         ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE NilRecord], 
-        ![replica].endOffset = newEndOffset]
+        ![replica].endOffset = newEndOffset,
+        ![replica].startOffset = [IF newEndOffset = 0 THEN 0 ELSE log.startOffset]]
 
-TruncateFullyAndStartAt2(replica, newStartOffset) == LET log == logs[replica] IN
+TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
     /\ newStartOffset \geq log.startOffset
     /\ logs' = [logs EXCEPT 
         \* Empty all data from the logs
-        ![replica].records = [offset \in Offsets |-> [id |-> -1, 
-                                                    epoch |-> -1]],  \* TODO - 
+        ![replica].records = [offset \in Offsets |-> NilRecord],
         ![replica].startOffset = newStartOffset,
         ![replica].endOffset = newStartOffset]
 
 \* We don't need to update end offset because it is guaranteed that end offset will remain unchanged due to
 \* the enabling condition /\ tillOffset < log.endOffset
-TruncateFullyAndStartAt(replica, tillOffset) == LET log == logs[replica] IN
+TruncateFromTailTillOffset(replica, tillOffset) == LET log == logs[replica] IN
     /\ tillOffset \geq log.startOffset
     /\ tillOffset < log.endOffset
     /\ logs' = [logs EXCEPT 
         \* Empty all data from the logs
-        ![replica].records = [offset \in Offsets |-> IF offset > tillOffset THEN @[offset] ELSE [id |-> -1, 
-                                                                                                 epoch |-> -1]], 
+        ![replica].records = [offset \in Offsets |-> IF offset > tillOffset THEN @[offset] ELSE NilRecord], 
         ![replica].startOffset = tillOffset + 1]
     
 
@@ -162,7 +159,7 @@ ReplicateTo(fromReplica, toReplica) == \E offset \in Offsets, record \in LogReco
 LOCAL Next == \E replica \in Replicas :
     \/ \E record \in LogRecords, offset \in Offsets : Append(replica, record, offset)
     \/ \E offset \in Offsets : TruncateTo(replica, offset)
-    \/ \E offset \in Offsets : TruncateFullyAndStartAt(replica, offset)
+    \/ \E offset \in Offsets : TruncateFromTailTillOffset(replica, offset)
     \/ \E otherReplica \in Replicas \ {replica} : ReplicateTo(replica, otherReplica)
         
 LOCAL Spec == Init /\ [][Next]_logs

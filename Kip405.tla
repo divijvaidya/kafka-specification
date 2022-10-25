@@ -5,11 +5,10 @@ EXTENDS KafkaReplication, TLC
 LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
 LOCAL GetGlobalLogStartOffset == RemoteLog!GetStartOffset
 
-\* TODO - Change the name of state from LeaderDataExpireKIP405 to ReplicaDataExpireKIP405
-LeaderDataExpireKIP405 == \E replica \in Replicas:
+ReplicaDataExpireKIP405 == \E replica \in Replicas:
         /\ ~RemoteLog!IsEmpty \* Only enable this state is remote log is non-empty
         /\ \E tillOffset \in RemoteLog!GetRemoteOffsetRange:
-            /\ ReplicaLog!TruncateFullyAndStartAt(replica, tillOffset)
+            /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 \* FencedFollowerFetchKIP405 == \E follower, leader \in Replicas :
@@ -38,7 +37,6 @@ LeaderDataExpireKIP405 == \E replica \in Replicas:
 \* after this follower should have a localLogStartOffset = leaderLogStartOffset
 \* followers epoch history chain.end >= targetEpoch
 \*
-
 FollowerBuildAuxState == \E leader, follower \in Replicas :
     /\ IsFollowingLeaderEpoch(leader, follower)
     \* The next conditions are to ensure that when we talk to the leader, leader should treat itself as leader.
@@ -50,27 +48,28 @@ FollowerBuildAuxState == \E leader, follower \in Replicas :
     /\ ReplicaLog!TruncateFullyAndStartAt(follower, GetLocalLogStartOffset(leader))
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
-\* diviv - todo - build a LeaderArchiveToRemoteStorage state
+\* LeaderArchiveToRemoteStorage state
 \* end offset of TS for a particular epoch chain <= hw (last stable offset) of leader
 \* 
 LeaderArchiveToRemoteStorage == \E leader \in Replicas :
     /\ ReplicaPresumesLeadership(leader)
-    /\ \E uploadOffset \in ReplicaLog!GetStartOffset(leader) .. GetHighWatermark(leader):
+    /\ \E uploadOffset \in RemoteLog!GetEndOffset..ReplicaLog!GetHighwatermark(leader):
         /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, uploadOffset), uploadOffset)
     /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (** 
- * Invariant to test the contibuity of the logs
+ * Invariant to test the continuity of the logs
  *)
-LogContinuityOK == \E replica \in Replicas :
+LogContinuityOk == \E replica \in Replicas :
     \* There are no holes in the log
     /\ RemoteLog!GetEndOffset >= ReplicaLog!GetStartOffset(replica)
 
+(**
+ * Uncommitted offsets on a leader cannot be moved to Remote Storage
+ * 1. Enable for cases when ISR is in sync
+ *)
 LogArchiveOk == \E leader \in Replicas :
-    /\ ReplicaPresumesLeadership(leader) 
-    /\ \A replica \in Replicas :
-        /\ IsFollowingLeaderEpoch(leader, replica)
-    => /\ RemoteLog!GetEndOffset < GetHighWatermark(leader) \* todo - is it < or <=11    \* Uncommitted offsets cannot be moved to Remote Storage
+    /\ NoSplitBrain(leader) => RemoteLog!GetEndOffset < GetHighWatermark(follower)
     
 TestLeaderLogNotExpire == ~\E replica \in Replicas :
     ReplicaLog!GetStartOffset(replica) = 2
@@ -88,7 +87,7 @@ Next ==
     \/ FencedLeaderIncHighWatermark 
     \/ FencedBecomeFollowerAndTruncate
     \/ FencedFollowerFetch
-    \/ LeaderDataExpireKIP405
+    \/ ReplicaDataExpireKIP405
     \/ FollowerBuildAuxState
     \/ LeaderArchiveToRemoteStorage
 

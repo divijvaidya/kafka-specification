@@ -392,6 +392,10 @@ LeaderInIsr == quorumState.leader \in quorumState.isr
  *)
 LOCAL IsFollowerIsrEligible(follower) == TRUE
      
+NoSplitBrain(leader) == \E leader \in Replicas :
+    /\ \A replica \in Replicas:
+        /\ replicaState[replica] # None
+        /\ IsFollowingLeaderEpoch(leader, replica)
 
 IsFollowingLeaderEpoch(leader, follower) == 
     /\ ReplicaPresumesLeadership(leader)
@@ -511,12 +515,10 @@ FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsr
                    /\ BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
-LOCAL GetHw(replica) == replicaState[replica].hw
-
 GetCommittedOffsets(replica) ==
     IF ReplicaLog!IsEmpty(replica)
     THEN {}
-    ELSE ReplicaLog!GetStartOffset(replica) .. GetHw(replica)
+    ELSE ReplicaLog!GetStartOffset(replica) .. GetHighWatermark(replica)
 
 
 \* diviv - todo Add state LeaderDataEviction
@@ -529,7 +531,7 @@ GetCommittedOffsets(replica) ==
 \* do we expire for all replicas instead of just the leader? (yes)
 LeaderDataExpire == \E replica \in Replicas :
     /\ \E tillOffset \in GetCommittedOffsets(replica) :
-        /\ ReplicaLog!TruncateFullyAndStartAt(replica, tillOffset)
+        /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 
