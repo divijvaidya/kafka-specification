@@ -53,7 +53,7 @@ FollowerBuildAuxState == \E leader, follower \in Replicas :
 \* 
 LeaderArchiveToRemoteStorage == \E leader \in Replicas :
     /\ ReplicaPresumesLeadership(leader)
-    /\ \E uploadOffset \in RemoteLog!GetEndOffset..ReplicaLog!GetHighwatermark(leader):
+    /\ \E uploadOffset \in RemoteLog!GetEndOffset..GetHighwatermark(leader):
         /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, uploadOffset), uploadOffset)
     /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
@@ -66,10 +66,11 @@ LogContinuityOk == \E replica \in Replicas :
 
 (**
  * Uncommitted offsets on a leader cannot be moved to Remote Storage
- * 1. Enable for cases when ISR is in sync
+ * - Enable for cases when NoSplitBrain
+ * - TODO: Handle split brain
  *)
 LogArchiveOk == \E leader \in Replicas :
-    /\ NoSplitBrain(leader) => RemoteLog!GetEndOffset < GetHighWatermark(follower)
+    /\ NoSplitBrain(leader) => RemoteLog!GetEndOffset < GetHighWatermark(leader)
     
 TestLeaderLogNotExpire == ~\E replica \in Replicas :
     ReplicaLog!GetStartOffset(replica) = 2

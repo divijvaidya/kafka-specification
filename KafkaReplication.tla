@@ -391,17 +391,16 @@ LeaderInIsr == quorumState.leader \in quorumState.isr
  * allowed to join the ISR.
  *)
 LOCAL IsFollowerIsrEligible(follower) == TRUE
-     
-NoSplitBrain(leader) == \E leader \in Replicas :
-    /\ \A replica \in Replicas:
-        /\ replicaState[replica] # None
-        /\ IsFollowingLeaderEpoch(leader, replica)
 
 IsFollowingLeaderEpoch(leader, follower) == 
     /\ ReplicaPresumesLeadership(leader)
     /\ replicaState[follower].leader = leader
     /\ replicaState[follower].leaderEpoch = replicaState[leader].leaderEpoch
 
+NoSplitBrain(leader) ==
+    /\ \A replica \in Replicas:
+        /\ replicaState[replica] # None
+        /\ IsFollowingLeaderEpoch(leader, replica)
 (**
  * Followers can fetch as long as they have the same epoch as the leader. Prior to fetching,
  * followers are responsible for truncating the log so that it matches the leader's. The

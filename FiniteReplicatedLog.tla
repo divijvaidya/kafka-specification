@@ -112,7 +112,7 @@ GetAllEntries(replica) == LET log == logs[replica] IN
 LOCAL ReplicaLogTypeOk(replica) == LET log == logs[replica] IN
     /\ log \in LogType
     /\ \A offset \in GetWrittenOffsets(replica) : log.records[offset] \in LogRecords
-    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = Nil
+    /\ \A offset \in GetUnwrittenOffsets(replica) : log.records[offset] = NilRecord
     /\ GetEndOffset(replica) >= GetStartOffset(replica)
     
 TypeOk == \A replica \in Replicas : ReplicaLogTypeOk(replica)
@@ -130,7 +130,7 @@ TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
     /\ logs' = [logs EXCEPT 
         ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE NilRecord], 
         ![replica].endOffset = newEndOffset,
-        ![replica].startOffset = [IF newEndOffset = 0 THEN 0 ELSE log.startOffset]]
+        ![replica].startOffset = IF newEndOffset = 0 THEN 0 ELSE log.startOffset]
 
 TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
     /\ newStartOffset \geq log.startOffset
