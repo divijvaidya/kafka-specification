@@ -75,12 +75,25 @@ LogArchiveOk == \E leader \in Replicas :
 TestLeaderLogNotExpire == 
     /\ \E leader \in Replicas:
             /\ IsTrueLeader(leader)
-            /\ ReplicaLog!GetStartOffset(leader) = 1
+            /\ ReplicaLog!GetStartOffset(leader) > 1
             /\ \A replica \in Replicas:
                 /\ IsFollowingLeaderEpoch(replica, leader)
     => /\ \A replica \in Replicas :
            /\ ReplicaLog!GetStartOffset(replica) < 1
-
+           
+\* TODO           
+\*AllInSyncReplicaHaveSameDataTillHw
+           
+TestReplicaHasMovedStartOffset ==
+    \/ ~\E replica, leader \in Replicas:
+        /\ ~ReplicaPresumesLeadership(replica)
+        /\ ReplicaLog!GetStartOffset(replica) = 1
+        /\ IsFollowingLeaderEpoch(replica, leader)
+        /\ IsTrueLeader(leader)
+    \/ ~\E leader \in Replicas:
+        /\ IsTrueLeader(leader)
+        /\ ReplicaLog!GetStartOffset(leader) = 1
+    
 TestLeaderNotIncrementingHw == \A replica \in Replicas :
     replicaState[replica].hw = 0
 
@@ -108,6 +121,6 @@ Spec == Init /\ [][Next]_vars
 THEOREM Spec => []TypeOk
 =============================================================================
 \* Modification History
-\* Last modified Tue Oct 25 15:29:03 UTC 2022 by ec2-user
+\* Last modified Wed Oct 26 16:56:19 UTC 2022 by ec2-user
 \* Last modified Thu Oct 20 10:04:24 PDT 2022 by diviv
 \* Created Wed Sep 14 15:39:13 CEST 2022 by diviv

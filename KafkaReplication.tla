@@ -104,7 +104,7 @@ QuorumState == [leaderEpoch: LeaderEpochOpt,
  * epoch is updated when a LeaderAndIsr request is received. 
  *)   
  \* divij -> HW = LSO              
-ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize}, 
+ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize, Nil}, 
                  leaderEpoch: LeaderEpochOpt,
                  leader : ReplicaOpt, 
                  isr: SUBSET Replicas
@@ -568,7 +568,7 @@ THEOREM Spec => []StrongIsr
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Oct 25 16:16:28 UTC 2022 by ec2-user
+\* Last modified Wed Oct 26 19:23:15 UTC 2022 by ec2-user
 \* Last modified Thu Oct 20 09:38:17 PDT 2022 by diviv
 \* Last modified Thu Jan 02 14:37:55 PST 2020 by guozhang
 \* Last modified Mon Jul 09 14:24:02 PDT 2018 by jason
