@@ -5,22 +5,12 @@ LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
 LOCAL GetGlobalLogStartOffset == RemoteLog!GetStartOffset
 
 ReplicaDataExpireKIP405 == \E replica \in Replicas:
-        /\ ~RemoteLog!IsEmpty \* Only enable this state is remote log is non-empty
-        /\ \E tillOffset \in RemoteLog!GetRemoteOffsetRange:
+        /\ ~RemoteLog!IsEmpty \* For optimization, only enable this state is remote log is non-empty
+        /\ \E tillOffset \in GetCommittedOffsets(replica):
+            /\ tillOffset < RemoteLog!GetEndOffset \* tillOffset should be present in remote storage
             /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
-\* FencedFollowerFetchKIP405 == \E follower, leader \in Replicas :
-\*     /\ IsFollowingLeaderEpoch(leader, follower)
-\*     \* Followers can only enter the fetch state when their end offset >= leader's local log start offset
-\*     \* TODO - The Hasentry condition already checks for this
-\*     /\ ReplicaLog!GetEndOffset(follower) >= GetLocalLogStartOffset(leader)
-\*     /\ ReplicaLog!ReplicateTo(leader, follower)
-\*     /\ LET  newEndOffset == ReplicaLog!GetEndOffset(follower) + 1
-\*             leaderHw == replicaState[leader].hw
-\*             followerHw == Min({leaderHw, newEndOffset})
-\*        IN   replicaState' = [replicaState EXCEPT ![follower].hw = followerHw]
-\*     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
  * Entry criteria for this state: follower's endOffset < leader's local start offset
@@ -52,7 +42,7 @@ FollowerBuildAuxState == \E leader, follower \in Replicas :
 \* 
 LeaderArchiveToRemoteStorage == \E leader \in Replicas :
     /\ ReplicaPresumesLeadership(leader)
-    /\ \E uploadOffset \in RemoteLog!GetEndOffset..GetHighWatermark(leader):
+    /\ \E uploadOffset \in RemoteLog!GetEndOffset..GetHighWatermark(leader) - 1:
         /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, uploadOffset), uploadOffset)
     /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
@@ -60,7 +50,7 @@ LeaderArchiveToRemoteStorage == \E leader \in Replicas :
  * Invariant to test the continuity of the logs
  * TODO - Add invaraint that the epoch for latest remote offset is part of leader chain
  *)
-LogContinuityOk == \E leader \in Replicas :
+LogContinuityOk == \A leader \in Replicas :
     \* There are no holes in the log when compared to true leader
     /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset >= ReplicaLog!GetStartOffset(leader) 
 
@@ -68,48 +58,61 @@ LogContinuityOk == \E leader \in Replicas :
  * Uncommitted offsets on a leader cannot be moved to Remote Storage
  * - Enable for cases when NoSplitBrain
  * - TODO: Handle split brain
+ * Note that this is not true in situation where leader hw is behind true water mark and the previous leader had already uploaded
+ * Chat with Vaibhav
  *)
-LogArchiveOk == \E leader \in Replicas :
-    /\ NoSplitBrain(leader) => RemoteLog!GetEndOffset < GetHighWatermark(leader)
-
-TestLeaderLogNotExpire == 
-    /\ \E leader \in Replicas:
-            /\ IsTrueLeader(leader)
-            /\ ReplicaLog!GetStartOffset(leader) > 1
-            /\ \A replica \in Replicas:
-                /\ IsFollowingLeaderEpoch(replica, leader)
-    => /\ \A replica \in Replicas :
-           /\ ReplicaLog!GetStartOffset(replica) < 1
+LogArchiveOk == \A leader \in Replicas :
+    /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset <= GetHighWatermark(leader)
            
 \* TODO           
 \*AllInSyncReplicaHaveSameDataTillHw
            
 TestReplicaHasMovedStartOffset ==
-    \/ ~\E replica, leader \in Replicas:
-        /\ ~ReplicaPresumesLeadership(replica)
-        /\ ReplicaLog!GetStartOffset(replica) = 1
-        /\ IsFollowingLeaderEpoch(replica, leader)
+    ~\E replica, leader \in Replicas:
+        /\ replica # leader
         /\ IsTrueLeader(leader)
-    \/ ~\E leader \in Replicas:
-        /\ IsTrueLeader(leader)
-        /\ ReplicaLog!GetStartOffset(leader) = 1
-    
-TestLeaderNotIncrementingHw == \A replica \in Replicas :
-    replicaState[replica].hw = 0
+        /\ ReplicaLog!GetStartOffset(replica) = 2
+        /\ ReplicaLog!GetStartOffset(leader) = 2
+        /\ IsFollowingLeaderEpoch(leader, replica)
+        /\ GetHighWatermark(replica) = 3
+        /\ \E re \in replicaState[leader].isr:
+            /\ re = replica
+
+TestFollowerCatchesUpHw == ~\E replica, leader \in Replicas:
+    /\ replica # leader
+    /\ IsFollowingLeaderEpoch(leader, replica)
+    /\ GetHighWatermark(leader) > 0
+    /\ GetHighWatermark(replica) = GetHighWatermark(leader)
+
+TestFollowerStartOffsetIncreases == ~\E replica, leader \in Replicas:
+    /\ replica # leader
+    /\ IsFollowingLeaderEpoch(leader, replica)
+    /\ ReplicaLog!GetStartOffset(replica) = 2
+    /\ ReplicaLog!GetStartOffset(leader) = ReplicaLog!GetStartOffset(replica)
+
+TestFollowerEndOffsetIncreases == ~\E replica, leader \in Replicas:
+    /\ replica # leader
+    /\ IsFollowingLeaderEpoch(leader, replica)
+    /\ ReplicaLog!GetEndOffset(replica) = 1
+
+TestFollowerHwIncreases == ~\E replica, leader \in Replicas:
+    /\ replica # leader
+    /\ IsFollowingLeaderEpoch(leader, replica)
+    /\ GetHighWatermark(replica) = 1
 
 Next ==
-    \/ ControllerElectLeader 
-    \/ ControllerShrinkIsr
-    \/ BecomeLeader
+\*    \/ ControllerElectLeader 
+\*    \/ ControllerShrinkIsr
+\*    \/ BecomeLeader
     \/ FencedLeaderExpandIsr
-    \/ FencedLeaderShrinkIsr
-    \/ LeaderWrite
-    \/ FencedLeaderIncHighWatermark 
+\*    \/ FencedLeaderShrinkIsr
+\*    \/ LeaderWrite
+\*    \/ FencedLeaderIncHighWatermark 
     \/ FencedBecomeFollowerAndTruncate
-    \/ FencedFollowerFetch
-    \/ ReplicaDataExpireKIP405
-    \/ FollowerBuildAuxState
-    \/ LeaderArchiveToRemoteStorage
+\*    \/ FencedFollowerFetch
+\*    \/ ReplicaDataExpireKIP405
+\*    \/ FollowerBuildAuxState
+\*    \/ LeaderArchiveToRemoteStorage
 
 Spec == Init /\ [][Next]_vars 
              /\ SF_vars(FencedLeaderIncHighWatermark)
@@ -121,6 +124,6 @@ Spec == Init /\ [][Next]_vars
 THEOREM Spec => []TypeOk
 =============================================================================
 \* Modification History
-\* Last modified Wed Oct 26 16:56:19 UTC 2022 by ec2-user
+\* Last modified Fri Nov 04 17:34:34 UTC 2022 by ec2-user
 \* Last modified Thu Oct 20 10:04:24 PDT 2022 by diviv
 \* Created Wed Sep 14 15:39:13 CEST 2022 by diviv

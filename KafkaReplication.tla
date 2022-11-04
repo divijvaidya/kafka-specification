@@ -104,11 +104,13 @@ QuorumState == [leaderEpoch: LeaderEpochOpt,
  * epoch is updated when a LeaderAndIsr request is received. 
  *)   
  \* divij -> HW = LSO              
-ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize, Nil}, 
+ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize}, 
                  leaderEpoch: LeaderEpochOpt,
                  leader : ReplicaOpt, 
                  isr: SUBSET Replicas
                 ]
+
+GetHighWatermark(replica) == replicaState[replica].hw
 
 TypeOk ==
     /\ LeaderEpochSeq!TypeOk
@@ -118,8 +120,6 @@ TypeOk ==
     /\ replicaState \in [Replicas -> ReplicaState]
     /\ quorumState \in QuorumState
     /\ leaderAndIsrRequests \subseteq QuorumState
-    /\ \A replica \in Replicas:
-        /\ ~ReplicaLog!IsEmpty(replica) => replicaState[replica].hw < ReplicaLog!GetEndOffset(replica) 
 
 Init ==
     /\ LeaderEpochSeq!Init
@@ -134,9 +134,6 @@ Init ==
                       leader |-> None, 
                       isr |-> Replicas]
     /\ leaderAndIsrRequests = {}
-
-
-GetHighWatermark(replica) == replicaState[replica].hw
 
 (**
  * Check whether a broker believes itself to be the leader. The presumed leader will accept
@@ -426,12 +423,12 @@ FencedFollowerFetch == \E follower, leader \in Replicas : \* TODO - anything hap
  * on the leader's local ISR and not the quorum.
  *)
 FencedLeaderIncHighWatermark == \E leader \in Replicas :
-    /\ LET newLeaderHw == IF replicaState[leader].hw = 0 THEN 0 ELSE replicaState[leader].hw + 1
+    /\ LET newLeaderHw == replicaState[leader].hw + 1
        IN  /\ ReplicaLog!HasOffset(leader, newLeaderHw)
            /\ \A follower \in replicaState[leader].isr : 
               /\ IsFollowingLeaderEpoch(leader, follower)
               /\ ReplicaLog!HasOffset(follower, newLeaderHw)
-    /\ replicaState' = [replicaState EXCEPT ![leader].hw = IF replicaState[leader].hw = 0 THEN 0 ELSE @ + 1]
+    /\ replicaState' = [replicaState EXCEPT ![leader].hw = @ + 1]
     /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
@@ -519,7 +516,7 @@ FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsr
 GetCommittedOffsets(replica) ==
     IF ReplicaLog!IsEmpty(replica)
     THEN {}
-    ELSE ReplicaLog!GetStartOffset(replica) .. GetHighWatermark(replica)
+    ELSE ReplicaLog!GetStartOffset(replica) .. GetHighWatermark(replica) - 1
 
 
 \* diviv - todo Add state LeaderDataEviction
@@ -535,6 +532,20 @@ LeaderDataExpire == \E replica \in Replicas :
         /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
+\* the below condition is true "eventually"
+\*FollowerHwIsAlwaysLessThanLeader == \A replica, leader \in Replicas:
+\*    /\ IsFollowingLeaderEpoch(leader, replica) => GetHighWatermark(replica) <= GetHighWatermark(leader)
+
+HighWatermarkRangeOk == \A replica \in Replicas:
+    \/ /\ ReplicaLog!IsEmpty(replica)
+       /\ GetHighWatermark(replica) = ReplicaLog!GetEndOffset(replica)
+       /\ GetHighWatermark(replica) = ReplicaLog!GetStartOffset(replica)
+    \/ /\ GetHighWatermark(replica) <= ReplicaLog!GetEndOffset(replica)
+\*       /\ GetHighWatermark(replica) >= ReplicaLog!GetStartOffset(replica) this is not true for TS when local log start offset > loca hw which is in TS
+
+HighWatermarkOk == 
+    /\ HighWatermarkRangeOk
+\*    /\ FollowerHwIsAlwaysLessThanLeader
 
 \* Create a state without log tracked.
 
@@ -568,7 +579,7 @@ THEOREM Spec => []StrongIsr
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Oct 26 19:23:15 UTC 2022 by ec2-user
+\* Last modified Fri Nov 04 14:35:06 UTC 2022 by ec2-user
 \* Last modified Thu Oct 20 09:38:17 PDT 2022 by diviv
 \* Last modified Thu Jan 02 14:37:55 PST 2020 by guozhang
 \* Last modified Mon Jul 09 14:24:02 PDT 2018 by jason
