@@ -101,18 +101,18 @@ TestFollowerHwIncreases == ~\E replica, leader \in Replicas:
     /\ GetHighWatermark(replica) = 1
 
 Next ==
-\*    \/ ControllerElectLeader 
-\*    \/ ControllerShrinkIsr
-\*    \/ BecomeLeader
+    \/ ControllerElectLeader 
+    \/ ControllerShrinkIsr
+    \/ BecomeLeader
     \/ FencedLeaderExpandIsr
-\*    \/ FencedLeaderShrinkIsr
-\*    \/ LeaderWrite
-\*    \/ FencedLeaderIncHighWatermark 
+    \/ FencedLeaderShrinkIsr
+    \/ LeaderWrite
+    \/ FencedLeaderIncHighWatermark 
     \/ FencedBecomeFollowerAndTruncate
-\*    \/ FencedFollowerFetch
-\*    \/ ReplicaDataExpireKIP405
-\*    \/ FollowerBuildAuxState
-\*    \/ LeaderArchiveToRemoteStorage
+    \/ FencedFollowerFetch
+    \/ ReplicaDataExpireKIP405
+    \/ FollowerBuildAuxState
+    \/ LeaderArchiveToRemoteStorage
 
 Spec == Init /\ [][Next]_vars 
              /\ SF_vars(FencedLeaderIncHighWatermark)
