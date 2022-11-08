@@ -29,7 +29,6 @@
 
 EXTENDS Integers, Util
 
-\* divij - inputs provided to the execution, usually defined in configuration
 CONSTANTS 
     Replicas, 
     LogSize, 
@@ -40,12 +39,10 @@ None == "NONE"
 NilRecord == [id |-> -1, epoch |-> -1] 
 Nil == -1
 
-\* divij - the inputs defined in constants must satisfy the validations available in assume
 ASSUME 
     /\ None \notin Replicas
     /\ MaxLeaderEpoch \in Nat
 
-\* divij - stateful parameters 
 VARIABLES
     \* This is a function from the replicas to their local logs.  
     replicaLog,
@@ -79,7 +76,6 @@ VARIABLES
     \* that quorum modifications are instantaneous and observed by all interested parties.
     quorumState
 
-\* diviv - TODO Add remote log
 vars == <<replicaLog, remoteLog, replicaState, nextLeaderEpoch, nextRecordId, leaderAndIsrRequests, quorumState>> 
 
 LeaderEpochSeq == INSTANCE IdSequence WITH MaxId <- MaxLeaderEpoch, nextId <- nextLeaderEpoch
@@ -89,7 +85,6 @@ RecordSeq == INSTANCE IdSequence WITH MaxId <- MaxRecords - 1, nextId <- nextRec
 \* addition of the leader epoch in the message format, we simply ignore the epoch in the message.
 LogRecords == [id : RecordSeq!IdSet, epoch : LeaderEpochSeq!IdSet] 
 
-\* divij - TODO: Add remote log
 ReplicaLog == INSTANCE FiniteReplicatedLog WITH logs <- replicaLog
 RemoteLog == INSTANCE RemoteStorageLog WITH remoteLog <- remoteLog
 ReplicaOpt == Replicas \union {None}
@@ -102,8 +97,7 @@ QuorumState == [leaderEpoch: LeaderEpochOpt,
  * Each replica has a cached copy of the quorum state and a local high watermark. These
  * get updated in accordance with the Kafka replication protocol. For example, the leader
  * epoch is updated when a LeaderAndIsr request is received. 
- *)   
- \* divij -> HW = LSO              
+ *)         
 ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize}, 
                  leaderEpoch: LeaderEpochOpt,
                  leader : ReplicaOpt, 
@@ -147,10 +141,7 @@ IsTrueLeader(leader) ==
     /\ replicaState[leader].leaderEpoch = quorumState.leaderEpoch
 
 
- \* diviv TODO
- \* GlobalLogStartOffset == RemoteLog!GetStartOffset()
-
-(**
+ (**
  * Helper function to "send" a new LeaderAndIsr request. The leader epoch is bumped,
  * the quorum state is updated, and the new request is added to the LeaderAndIsr request set.
  *)
@@ -282,8 +273,6 @@ LeaderIncHighWatermark == \E offset \in ReplicaLog!Offsets, leader \in Replicas 
  *
  * TODO: Is this what we actually do in the code?   
  *) 
-\* divij - TODO Break this into multiple states. Become follower -> Fetch -> Truncate -> BuildAuxState
-\* divij - question - why is this considered atomic?
 BecomeFollowerAndTruncateTo(leader, replica, truncationOffset) == \E leaderAndIsrRequest \in leaderAndIsrRequests :
     /\ leader # replica
     /\ leaderAndIsrRequest.leader = leader
@@ -386,7 +375,7 @@ StrongIsr == \A r1 \in Replicas :
 LeaderInIsr == quorumState.leader \in quorumState.isr
 
 (**
- * divij - TODO - In zookeeper mode, we check if the replica is alive. In KRaft mode, only replicas which are not fenced nor in controlled shutdown are
+ * TODO - In zookeeper mode, we check if the replica is alive. In KRaft mode, only replicas which are not fenced nor in controlled shutdown are
  * allowed to join the ISR.
  *)
 LOCAL IsFollowerIsrEligible(follower) == TRUE
@@ -486,8 +475,6 @@ LOCAL BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark) ==
                           isr |-> leaderAndIsrRequest.isr,                                                        
                           hw |-> newHighWatermark]]
 
-
-
 (**
  * The only improvement here over the KIP-279 truncation logic is that we ensure that the
  * leader and follower have the same epoch. Without it, we violate the strong ISR property
@@ -519,22 +506,11 @@ GetCommittedOffsets(replica) ==
     ELSE ReplicaLog!GetStartOffset(replica) .. GetHighWatermark(replica) - 1
 
 
-\* diviv - todo Add state LeaderDataEviction
-\* the leader local log start offset changes
-\* log start offset can only be done if RS end offset > log start offset
-\* after this log start offset is a arbit offset <= RS.end offset <= HW 
-\* for tla+ we need to explore all transitions
-
-\* do we expire the epoch history too?
-\* do we expire for all replicas instead of just the leader? (yes)
-LeaderDataExpire == \E replica \in Replicas :
-    /\ \E tillOffset \in GetCommittedOffsets(replica) :
+ReplicaDataExpire == \E replica \in Replicas:
+    /\ ~RemoteLog!IsEmpty \* For optimization, only enable this state if remote log is non-empty
+    /\ \E tillOffset \in GetCommittedOffsets(replica):
         /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
-
-\* the below condition is true "eventually"
-\*FollowerHwIsAlwaysLessThanLeader == \A replica, leader \in Replicas:
-\*    /\ IsFollowingLeaderEpoch(leader, replica) => GetHighWatermark(replica) <= GetHighWatermark(leader)
 
 HighWatermarkRangeOk == \A replica \in Replicas:
     \/ /\ ReplicaLog!IsEmpty(replica)
@@ -545,9 +521,6 @@ HighWatermarkRangeOk == \A replica \in Replicas:
 
 HighWatermarkOk == 
     /\ HighWatermarkRangeOk
-\*    /\ FollowerHwIsAlwaysLessThanLeader
-
-\* Create a state without log tracked.
 
 LOCAL Next ==
     \/ ControllerElectLeader 
@@ -559,10 +532,7 @@ LOCAL Next ==
     \/ FencedLeaderIncHighWatermark 
     \/ FencedBecomeFollowerAndTruncate
     \/ FencedFollowerFetch
-    \/ LeaderDataExpire
-    
-\* divij - TODO: Add a state in Next to trigger expiration
-
+    \/ ReplicaDataExpire
 
 \* In the initial state, spec is true iff, init is true AND [][Next]_vars is true in every step
 LOCAL Spec == Init /\ [][Next]_vars \* Init is true in initial state AND it is always true in every state that either next is true or vars is unchanged 
