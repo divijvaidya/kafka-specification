@@ -67,14 +67,14 @@ FollowerBuildAuxState == \E leader, follower \in Replicas :
     /\ ReplicaLog!TruncateFullyAndStartAt(follower, GetLocalLogStartOffset(leader))
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
-\* LeaderArchiveToRemoteStorage state
-\* end offset of TS for a particular epoch chain <= hw (last stable offset) of leader
-\* 
+(*
+ * A replica which assumes itself to be the leader will write data to the remote storage till it's High watermark.
+ *) 
 LeaderArchiveToRemoteStorage == \E leader \in Replicas :
-    /\ ReplicaPresumesLeadership(leader)
-    /\ \E uploadOffset \in RemoteLog!GetEndOffset..GetHighWatermark(leader) - 1:
-        /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, uploadOffset), uploadOffset)
-    /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+       /\ ReplicaPresumesLeadership(leader)
+       /\ RemoteLog!GetEndOffset < GetHighWatermark(leader)
+       /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, RemoteLog!GetEndOffset), RemoteLog!GetEndOffset)
+       /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 ---------------------------------------------------------------------------
 
@@ -113,19 +113,19 @@ LocalLogConsistencyOk ==
     \/ quorumState.leader = None
     \/ LET leader == quorumState.leader IN
        LET hw == replicaState[leader].hw
-       IN  \A isrMember \in quorumState.isr, offset \in RemoteLog!GetEndOffset .. (hw - 1) : \E record \in LogRecords : 
+       IN  \A isr \in quorumState.isr, offset \in RemoteLog!GetEndOffset .. (hw - 1) : \E record \in LogRecords : 
                 /\ ReplicaLog!HasEntry(leader, record, offset)       
-                /\ ReplicaLog!HasEntry(isrMember, record, offset)
+                /\ ReplicaLog!HasEntry(isr, record, offset)
 
 (*  
  *  This invariant states that the records common to local log of a true ISR as well as remote log should be consistent.
  *)
 OverlappingLogConsistencyOk ==
-    \A isrMember \in quorumState.isr :
-        \A offset \in GetLocalLogStartOffset(isrMember) .. (RemoteLog!GetEndOffset - 1) : 
+    \A isr \in quorumState.isr :
+        \A offset \in GetLocalLogStartOffset(isr) .. (RemoteLog!GetEndOffset - 1) : 
             \E record \in LogRecords : 
                 /\ RemoteLog!HasEntry(record, offset)       
-                /\ ReplicaLog!HasEntry(isrMember, record, offset)
+                /\ ReplicaLog!HasEntry(isr, record, offset)
 
 (* 
  *  This invariant states that data which is not available locally would be available in remote log i.e.
@@ -135,10 +135,11 @@ LogContinuityOk == \A replica \in Replicas :
     /\ IsTrueLeader(replica) => RemoteLog!GetEndOffset >= GetLocalLogStartOffset(replica) 
 
 (*
- *  Uncommitted offsets on a leader cannot be moved to Remote Storage 
+ *  Uncommitted offsets on a leader cannot be moved to Remote Storage. However the leader's Hw might not have caught up to the true
+ *  Hw after an election. Hence, this property should be verified with strong fairness.
  *)
-LogArchiveOk == \A replica \in Replicas :
-    /\ IsTrueLeader(replica) => RemoteLog!GetEndOffset <= GetHighWatermark(replica) 
+ArchiveCommittedRecords == \A leader \in Replicas :
+    /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset <= GetHighWatermark(leader) 
 ---------------------------------------------------------------------------
 
 (**************)

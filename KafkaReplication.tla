@@ -317,10 +317,10 @@ MatchingOffsets(replica1, replica2) ==
  *)
 FirstNonMatchingOffsetFromTail(leader, follower) ==
     IF ReplicaLog!IsEmpty(leader)
-    THEN 0
+    THEN ReplicaLog!GetStartOffset(leader)
     ELSE LET matchingOffsets == MatchingOffsets(follower, leader)
          IN IF matchingOffsets = {} 
-            THEN 0
+            THEN ReplicaLog!GetStartOffset(leader)
             ELSE Max(matchingOffsets) + 1 
 
 (**
@@ -367,12 +367,7 @@ StrongIsr == \A r1 \in Replicas :
        IN   \/ hw = 0
             \/ \A r2 \in quorumState.isr, offset \in 0 .. (hw - 1) : \E record \in LogRecords : 
                 /\ ReplicaLog!HasEntry(r1, record, offset)        
-                /\ ReplicaLog!HasEntry(r2, record, offset) 
-
-(**
- * The leader should always in the ISR, because even if all brokers failed, we still keep the leader in ISR
- *)
-LeaderInIsr == quorumState.leader \in quorumState.isr
+                /\ ReplicaLog!HasEntry(r2, record, offset)
 
 (**
  * TODO - In zookeeper mode, we check if the replica is alive. In KRaft mode, only replicas which are not fenced nor in controlled shutdown are
@@ -512,6 +507,12 @@ ReplicaDataExpire == \E replica \in Replicas:
         /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
+---------------------------------------------------------------------------
+
+(**************)
+(* Invariants *)
+(**************)
+
 HighWatermarkRangeOk == \A replica \in Replicas:
     \/ /\ ReplicaLog!IsEmpty(replica)
        /\ GetHighWatermark(replica) = ReplicaLog!GetEndOffset(replica)
@@ -521,6 +522,12 @@ HighWatermarkRangeOk == \A replica \in Replicas:
 
 HighWatermarkOk == 
     /\ HighWatermarkRangeOk
+
+(**
+ * The leader should always in the ISR, because even if all brokers failed, we still keep the leader in ISR
+ *)
+LeaderInIsr == quorumState.leader \in quorumState.isr
+---------------------------------------------------------------------------
 
 LOCAL Next ==
     \/ ControllerElectLeader 
@@ -549,8 +556,8 @@ THEOREM Spec => []StrongIsr
 
 =============================================================================
 \* Modification History
+\* Last modified Tue Dec 13 19:18:00 CET 2022 by diviv
 \* Last modified Fri Nov 04 14:35:06 UTC 2022 by ec2-user
-\* Last modified Thu Oct 20 09:38:17 PDT 2022 by diviv
 \* Last modified Thu Jan 02 14:37:55 PST 2020 by guozhang
 \* Last modified Mon Jul 09 14:24:02 PDT 2018 by jason
 \* Created Sun Jun 10 16:16:51 PDT 2018 by jason
