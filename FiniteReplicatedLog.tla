@@ -17,7 +17,7 @@
  
 ------------------------ MODULE FiniteReplicatedLog ------------------------
 
-EXTENDS Integers, TLC
+EXTENDS Integers, Util, TLC
 
 CONSTANTS 
     Replicas, 
