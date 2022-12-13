@@ -77,7 +77,7 @@ FollowerTruncate == \E leader, follower \in Replicas :
     /\ ReplicaIsFollowing(follower, leader)
     /\ FollowerNeedsTruncation(follower, leader)
     /\ LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, follower) 
-       IN  /\ ReplicaLog!TruncateTo(follower, truncationOffset, ReplicaLog!GetStartOffset(follower))
+       IN  /\ ReplicaLog!TruncateTo(follower, truncationOffset)
            /\ replicaState' = [replicaState EXCEPT ![follower].hw = Min({truncationOffset, @})]
     /\ UNCHANGED <<nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 

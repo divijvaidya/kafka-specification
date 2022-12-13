@@ -132,12 +132,12 @@ Append(replica, record, offset) == LET log == logs[replica] IN
     /\ logs' = [logs EXCEPT ![replica].records[offset] = record, 
                             ![replica].endOffset = @ + 1] 
 
-TruncateTo(replica, newEndOffset, newStartOffset) == LET log == logs[replica] IN
+TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
     /\ newEndOffset \leq log.endOffset
     /\ logs' = [logs EXCEPT 
         ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE NilRecord], 
         ![replica].endOffset = newEndOffset,
-        ![replica].startOffset = IF newEndOffset = 0 THEN 0 ELSE newStartOffset]
+        ![replica].startOffset = IF newEndOffset = 0 THEN 0 ELSE Min({newEndOffset - 1, logs[replica].startOffset})]
 
 TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
     /\ newStartOffset \geq log.startOffset
@@ -165,7 +165,7 @@ ReplicateTo(fromReplica, toReplica) == \E offset \in Offsets, record \in LogReco
 
 LOCAL Next == \E replica \in Replicas :
     \/ \E record \in LogRecords, offset \in Offsets : Append(replica, record, offset)
-    \/ \E offset \in Offsets : TruncateTo(replica, offset, GetStartOffset(replica))
+    \/ \E offset \in Offsets : TruncateTo(replica, offset)
     \/ \E offset \in Offsets : TruncateFromTailTillOffset(replica, offset)
     \/ \E otherReplica \in Replicas \ {replica} : ReplicateTo(replica, otherReplica)
         

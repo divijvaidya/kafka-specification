@@ -280,7 +280,7 @@ BecomeFollowerAndTruncateTo(leader, replica, truncationOffset) == \E leaderAndIs
     /\  \/  /\ leader = None
             /\ UNCHANGED replicaLog
         \/  /\ leader # None
-            /\ ReplicaLog!TruncateTo(replica, truncationOffset, ReplicaLog!GetStartOffset(leader))
+            /\ ReplicaLog!TruncateTo(replica, truncationOffset)
     /\ replicaState' = [replicaState EXCEPT ![replica] = 
         [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
          leader |-> leader,
@@ -491,7 +491,7 @@ FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsr
             /\ replicaState[leader].leaderEpoch = leaderAndIsrRequest.leaderEpoch
             /\ LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, replica)
                    newHighWatermark == Min({truncationOffset, replicaState[replica].hw})
-               IN  /\ ReplicaLog!TruncateTo(replica, truncationOffset, ReplicaLog!GetStartOffset(leader))
+               IN  /\ ReplicaLog!TruncateTo(replica, truncationOffset)
                    /\ BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
@@ -499,7 +499,6 @@ GetCommittedOffsets(replica) ==
     IF ReplicaLog!IsEmpty(replica)
     THEN {}
     ELSE ReplicaLog!GetStartOffset(replica) .. GetHighWatermark(replica) - 1
-
 
 ReplicaDataExpire == \E replica \in Replicas:
     /\ ~RemoteLog!IsEmpty \* For optimization, only enable this state if remote log is non-empty
