@@ -173,8 +173,3 @@ LOCAL Spec == Init /\ [][Next]_logs
 
 THEOREM Spec => []TypeOk
 =============================================================================
-\* Modification History
-\* Last modified Thu Oct 27 09:20:35 UTC 2022 by ec2-user
-\* Last modified Fri Oct 21 07:42:34 PDT 2022 by diviv
-\* Last modified Mon Jul 09 14:23:51 PDT 2018 by jason
-\* Created Sat Jun 23 13:24:52 PDT 2018 by jason

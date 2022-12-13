@@ -1,16 +1,47 @@
+(*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *)
 ------------------------------- MODULE Kip405 -------------------------------
+(*  An model demonstrating the Apache Kafka replication protocol after the 
+    changes introduced by Kafka Tiered Storage (KIP-405).
+*)
 EXTENDS KafkaReplication, TLC
 
+---------------------------------------------------------------------------
 LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
-LOCAL GetGlobalLogStartOffset == RemoteLog!GetStartOffset
 
-ReplicaDataExpireKIP405 == \E replica \in Replicas:
-        /\ ~RemoteLog!IsEmpty \* For optimization, only enable this state is remote log is non-empty
+---------------------------------------------------------------------------
+
+(***********)
+(* Actions *)
+(***********)
+
+(*
+ * Expiration of data in each replica based on the configured data retention settings.
+ * 
+ * With KIP 405, a replica cannot exire the data until the data has been archived. Replica fetches
+ * this information from RLMM.
+ *)
+ReplicaDataExpireKIP405 ==
+    /\ \E replica \in Replicas: \* TODO - should this be \A
+        /\ ~RemoteLog!IsEmpty \* For optimization, only enable this state if remote log is non-empty
         /\ \E tillOffset \in GetCommittedOffsets(replica):
             /\ tillOffset < RemoteLog!GetEndOffset \* tillOffset should be present in remote storage
             /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
-
 
 (**
  * Entry criteria for this state: follower's endOffset < leader's local start offset
@@ -19,7 +50,6 @@ ReplicaDataExpireKIP405 == \E replica \in Replicas:
  * 3. Follower truncates from start until
  * 4. Follower fetches
  *)
- \* diviv - todo - add new state FollowerBuildAuxState
 \* targetEpoch should be defined at entry
 \* leader should have a local start offset > follower end offset (after truncation)
 \* follower should truncate from the start till leader.localLogstartOffset 
@@ -46,32 +76,80 @@ LeaderArchiveToRemoteStorage == \E leader \in Replicas :
         /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, uploadOffset), uploadOffset)
     /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
-(** 
- * Invariant to test the continuity of the logs
- * TODO - Add invaraint that the epoch for latest remote offset is part of leader chain
- *)
-LogContinuityOk == \A leader \in Replicas :
-    \* There are no holes in the log when compared to true leader
-    /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset >= ReplicaLog!GetStartOffset(leader) 
+---------------------------------------------------------------------------
 
-(**
- * Uncommitted offsets on a leader cannot be moved to Remote Storage
- * - Enable for cases when NoSplitBrain
- * - TODO: Handle split brain
- * Note that this is not true in situation where leader hw is behind true water mark and the previous leader had already uploaded
- * Chat with Vaibhav
+(*****************)
+(* Specification *)
+(*****************)
+
+\* TODO - import from original states and add after that
+Next ==
+    \/ ControllerElectLeader 
+    \/ ControllerShrinkIsr
+    \/ BecomeLeader
+    \/ FencedLeaderExpandIsr
+    \/ FencedLeaderShrinkIsr
+    \/ LeaderWrite
+    \/ FencedLeaderIncHighWatermark 
+    \/ FencedBecomeFollowerAndTruncate
+    \/ FencedFollowerFetch
+    \/ ReplicaDataExpireKIP405
+    \/ FollowerBuildAuxState
+    \/ LeaderArchiveToRemoteStorage
+
+Spec == Init /\ [][Next]_vars
+
+THEOREM Spec => []TypeOk
+---------------------------------------------------------------------------
+
+(**************)
+(* Invariants *)
+(**************)
+
+(*  This invariant states that the local records until the true leader's HW are consistently replicated amongst the members of true ISR.
+ *  This ensures that the local data that is exposed to the consumers will be present on any broker that becomes leader.
  *)
-LogArchiveOk == \A leader \in Replicas :
-    /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset <= GetHighWatermark(leader)
-           
-\* TODO           
-\*AllInSyncReplicaHaveSameDataTillHw
+LocalLogConsistencyOk ==
+    \/ quorumState.leader = None
+    \/ LET leader == quorumState.leader IN
+       LET hw == replicaState[leader].hw
+       IN  \A isrMember \in quorumState.isr, offset \in RemoteLog!GetEndOffset .. (hw - 1) : \E record \in LogRecords : 
+                /\ ReplicaLog!HasEntry(leader, record, offset)       
+                /\ ReplicaLog!HasEntry(isrMember, record, offset)
+
+(*  
+ *  This invariant states that the records common to local log of a true ISR as well as remote log should be consistent.
+ *)
+OverlappingLogConsistencyOk ==
+    \A isrMember \in quorumState.isr :
+        \A offset \in GetLocalLogStartOffset(isrMember) .. (RemoteLog!GetEndOffset - 1) : 
+            \E record \in LogRecords : 
+                /\ RemoteLog!HasEntry(record, offset)       
+                /\ ReplicaLog!HasEntry(isrMember, record, offset)
+
+(* 
+ *  This invariant states that data which is not available locally would be available in remote log i.e.
+ *  there are no holes in the log.
+ *)
+LogContinuityOk == \A replica \in Replicas :
+    /\ IsTrueLeader(replica) => RemoteLog!GetEndOffset >= GetLocalLogStartOffset(replica) 
+
+(*
+ *  Uncommitted offsets on a leader cannot be moved to Remote Storage 
+ *)
+LogArchiveOk == \A replica \in Replicas :
+    /\ IsTrueLeader(replica) => RemoteLog!GetEndOffset <= GetHighWatermark(replica) 
+---------------------------------------------------------------------------
+
+(**************)
+(* Tests *)
+(**************)
            
 TestReplicaHasMovedStartOffset ==
     ~\E replica, leader \in Replicas:
         /\ replica # leader
         /\ IsTrueLeader(leader)
-        /\ ReplicaLog!GetStartOffset(replica) = 2
+        /\ ReplicaLog!GetStartOffset(replica) = 2 \* TODO - use the constant variable
         /\ ReplicaLog!GetStartOffset(leader) = 2
         /\ IsFollowingLeaderEpoch(leader, replica)
         /\ GetHighWatermark(replica) = 3
@@ -99,31 +177,4 @@ TestFollowerHwIncreases == ~\E replica, leader \in Replicas:
     /\ replica # leader
     /\ IsFollowingLeaderEpoch(leader, replica)
     /\ GetHighWatermark(replica) = 1
-
-Next ==
-    \/ ControllerElectLeader 
-    \/ ControllerShrinkIsr
-    \/ BecomeLeader
-    \/ FencedLeaderExpandIsr
-    \/ FencedLeaderShrinkIsr
-    \/ LeaderWrite
-    \/ FencedLeaderIncHighWatermark 
-    \/ FencedBecomeFollowerAndTruncate
-    \/ FencedFollowerFetch
-    \/ ReplicaDataExpireKIP405
-    \/ FollowerBuildAuxState
-    \/ LeaderArchiveToRemoteStorage
-
-Spec == Init /\ [][Next]_vars 
-             /\ SF_vars(FencedLeaderIncHighWatermark)
-             /\ SF_vars(FencedLeaderExpandIsr)
-             /\ SF_vars(LeaderWrite)
-             /\ WF_vars(FencedBecomeFollowerAndTruncate)
-             /\ WF_vars(BecomeLeader)
-
-THEOREM Spec => []TypeOk
 =============================================================================
-\* Modification History
-\* Last modified Fri Nov 04 17:34:34 UTC 2022 by ec2-user
-\* Last modified Thu Oct 20 10:04:24 PDT 2022 by diviv
-\* Created Wed Sep 14 15:39:13 CEST 2022 by diviv
