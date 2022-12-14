@@ -122,10 +122,11 @@ LocalLogConsistencyOk ==
  *)
 OverlappingLogConsistencyOk ==
     \A isr \in quorumState.isr :
-        \A offset \in GetLocalLogStartOffset(isr) .. (RemoteLog!GetEndOffset - 1) : 
-            \E record \in LogRecords : 
-                /\ RemoteLog!HasEntry(record, offset)       
-                /\ ReplicaLog!HasEntry(isr, record, offset)
+        /\ ~ ReplicaLog!IsEmpty(isr)
+        => \A offset \in GetLocalLogStartOffset(isr) .. (RemoteLog!GetEndOffset - 1) : 
+                \E record \in LogRecords : 
+                    /\ RemoteLog!HasEntry(record, offset)       
+                    /\ ReplicaLog!HasEntry(isr, record, offset)
 
 (* 
  *  This invariant states that data which is not available locally would be available in remote log i.e.

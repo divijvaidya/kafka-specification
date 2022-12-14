@@ -134,10 +134,11 @@ Append(replica, record, offset) == LET log == logs[replica] IN
 
 TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
     /\ newEndOffset \leq log.endOffset
-    /\ logs' = [logs EXCEPT 
-        ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE NilRecord], 
-        ![replica].endOffset = newEndOffset,
-        ![replica].startOffset = IF newEndOffset = 0 THEN 0 ELSE Min({newEndOffset - 1, logs[replica].startOffset})]
+    /\ IF newEndOffset = 0 THEN TruncateFullyAndStartAt(replica, 0)
+       ELSE 
+            logs' = [logs EXCEPT 
+            ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE NilRecord], 
+            ![replica].endOffset = newEndOffset]
 
 TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
     /\ newStartOffset \geq log.startOffset

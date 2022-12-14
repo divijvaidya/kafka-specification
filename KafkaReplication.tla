@@ -490,9 +490,9 @@ FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsr
             /\ ReplicaPresumesLeadership(leader)
             /\ replicaState[leader].leaderEpoch = leaderAndIsrRequest.leaderEpoch
             /\ LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, replica)
-                   newHighWatermark == Min({truncationOffset, replicaState[replica].hw})
                IN  /\ ReplicaLog!TruncateTo(replica, truncationOffset)
-                   /\ BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
+                   LET newHighWatermark == Min({truncationOffset, replicaState[replica].hw}) IN 
+                        /\ BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 GetCommittedOffsets(replica) ==
