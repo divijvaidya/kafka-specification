@@ -132,14 +132,6 @@ Append(replica, record, offset) == LET log == logs[replica] IN
     /\ logs' = [logs EXCEPT ![replica].records[offset] = record, 
                             ![replica].endOffset = @ + 1] 
 
-TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
-    /\ newEndOffset \leq log.endOffset
-    /\ IF newEndOffset = 0 THEN TruncateFullyAndStartAt(replica, 0)
-       ELSE 
-            logs' = [logs EXCEPT 
-            ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE NilRecord], 
-            ![replica].endOffset = newEndOffset]
-
 TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
     /\ newStartOffset \geq log.startOffset
     /\ logs' = [logs EXCEPT 
@@ -147,6 +139,14 @@ TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
         ![replica].records = [offset \in Offsets |-> NilRecord],
         ![replica].startOffset = newStartOffset,
         ![replica].endOffset = newStartOffset]
+        
+TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
+    /\ newEndOffset \leq log.endOffset
+    /\ IF newEndOffset = 0 THEN TruncateFullyAndStartAt(replica, 0)
+       ELSE 
+            logs' = [logs EXCEPT 
+            ![replica].records = [offset \in Offsets |-> IF offset < newEndOffset THEN @[offset] ELSE NilRecord], 
+            ![replica].endOffset = newEndOffset]
 
 \* We don't need to update end offset because it is guaranteed that end offset will remain unchanged due to
 \* the enabling condition /\ tillOffset < log.endOffset

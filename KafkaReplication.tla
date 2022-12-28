@@ -478,6 +478,8 @@ LOCAL BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark) ==
  * epoch. You can verify this failure by replacing this action with `BecomeFollowerTruncateKip279`
  * in the spec below.
  * 
+ * Note: There is a call to leader here to fetch the end offset, start offset
+ * 
  *)
 FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsrRequest \in leaderAndIsrRequests :
     /\ leader # replica
@@ -489,10 +491,17 @@ FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsr
         \/  /\ leader # None
             /\ ReplicaPresumesLeadership(leader)
             /\ replicaState[leader].leaderEpoch = leaderAndIsrRequest.leaderEpoch
-            /\ LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, replica)
-               IN  /\ ReplicaLog!TruncateTo(replica, truncationOffset)
-                   LET newHighWatermark == Min({truncationOffset, replicaState[replica].hw}) IN 
-                        /\ BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
+            /\  IF ReplicaLog!GetEndOffset(replica) > ReplicaLog!GetEndOffset(leader)
+                THEN /\ ReplicaLog!TruncateTo(replica, ReplicaLog!GetEndOffset(leader))
+                     /\ LET newHighWatermark == Min({ReplicaLog!GetEndOffset(replica), replicaState[replica].hw})
+                        IN BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
+                ELSE IF ReplicaLog!GetEndOffset(replica) < ReplicaLog!GetStartOffset(leader)
+                THEN    /\ ReplicaLog!TruncateFullyAndStartAt(replica, ReplicaLog!GetStartOffset(leader))
+                        /\ BecomeFollower(replica, leaderAndIsrRequest, ReplicaLog!GetEndOffset(replica))
+                ELSE LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, replica)  
+                     IN /\ ReplicaLog!TruncateTo(replica, truncationOffset)
+                        /\ LET newHighWatermark == Min({truncationOffset, replicaState[replica].hw})
+                           IN BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 GetCommittedOffsets(replica) ==
