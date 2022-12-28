@@ -91,6 +91,8 @@ IsLatestRecord(replica, record) == \E offset \in Offsets : IsLatestEntry(replica
 GetEndOffset(replica) == logs[replica].endOffset
 
 GetStartOffset(replica) == logs[replica].startOffset
+SetStartOffset(replica, newStartOffset) == 
+    /\ logs[replica].startOffset = newStartOffset
 
 IsEndOffset(replica, offset) == logs[replica].endOffset = offset 
 
@@ -139,7 +141,7 @@ TruncateFullyAndStartAt(replica, newStartOffset) == LET log == logs[replica] IN
         ![replica].records = [offset \in Offsets |-> NilRecord],
         ![replica].startOffset = newStartOffset,
         ![replica].endOffset = newStartOffset]
-        
+
 TruncateTo(replica, newEndOffset) == LET log == logs[replica] IN
     /\ newEndOffset \leq log.endOffset
     /\ IF newEndOffset = 0 THEN TruncateFullyAndStartAt(replica, 0)

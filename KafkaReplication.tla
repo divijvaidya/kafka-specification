@@ -399,6 +399,7 @@ FencedFollowerFetch == \E follower, leader \in Replicas : \* TODO - anything hap
             leaderHw == replicaState[leader].hw
             followerHw == Min({leaderHw, newEndOffset})
        IN   replicaState' = [replicaState EXCEPT ![follower].hw = followerHw]
+    /\ ReplicaLog!SetStartOffset(follower, ReplicaLog!GetStartOffset(leader)) \* TODO - We are not deleting data, just incrementing the offset. Also in TS, this should be set to local start offset 
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
