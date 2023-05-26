@@ -27,7 +27,7 @@
  * LeaderAndIsr requests to the replicas.
  *)
 
-EXTENDS Integers, Util
+EXTENDS Integers, Util, TLC
 
 CONSTANTS 
     Replicas, 
@@ -97,23 +97,18 @@ QuorumState == [leaderEpoch: LeaderEpochOpt,
  * Each replica has a cached copy of the quorum state and a local high watermark. These
  * get updated in accordance with the Kafka replication protocol. For example, the leader
  * epoch is updated when a LeaderAndIsr request is received. 
+ * 
  *)         
 ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize}, 
                  leaderEpoch: LeaderEpochOpt,
                  leader : ReplicaOpt, 
-                 isr: SUBSET Replicas
+                 isr: SUBSET Replicas,
+                 fetchState: {"FETCH", "TRUNCATE", "BUILDAUX"} \union Nil
                 ]
 
 GetHighWatermark(replica) == replicaState[replica].hw
 
-TypeOk ==
-    /\ LeaderEpochSeq!TypeOk
-    /\ RecordSeq!TypeOk
-    /\ ReplicaLog!TypeOk
-    /\ RemoteLog!TypeOk
-    /\ replicaState \in [Replicas -> ReplicaState]
-    /\ quorumState \in QuorumState
-    /\ leaderAndIsrRequests \subseteq QuorumState
+LOCAL GetLocalLogStartOffset(replica) == ReplicaLog!GetStartOffset(replica)
 
 Init ==
     /\ LeaderEpochSeq!Init
@@ -123,7 +118,8 @@ Init ==
     /\ replicaState = [replica \in Replicas |-> [hw |-> ReplicaLog!GetStartOffset(replica), 
                                                  leaderEpoch |-> Nil, 
                                                  leader |-> None, 
-                                                 isr |-> {}]]
+                                                 isr |-> {},
+                                                 fetchState |-> Nil]]
     /\ quorumState = [leaderEpoch |-> Nil,
                       leader |-> None, 
                       isr |-> Replicas]
@@ -144,15 +140,27 @@ IsTrueLeader(leader) ==
  (**
  * Helper function to "send" a new LeaderAndIsr request. The leader epoch is bumped,
  * the quorum state is updated, and the new request is added to the LeaderAndIsr request set.
+ * 
+ * We need to bump the leader epoch if:
+ * 1. The leader changed, or
+ * 2. The new ISR does not contain all the nodes that the old ISR did, or
+ * 3. The new replica list does not contain all the nodes that the old replica list did. 
+ * TODO - https://github.com/apache/kafka/pull/13765 changes confition 2
+ * 
+ * Code Reference: PartitionChangeBuilder#triggerLeaderEpochBumpIfNeeded
  *)
-ControllerUpdateIsr(newLeader, newIsr) == \E newLeaderEpoch \in LeaderEpochSeq!IdSet :
-    /\ LeaderEpochSeq!NextId(newLeaderEpoch)
-    /\  LET newControllerState == [
-            leader |-> newLeader,
-            leaderEpoch |-> newLeaderEpoch, 
-            isr |-> newIsr] 
-        IN  /\ quorumState' = newControllerState 
-            /\ leaderAndIsrRequests' = leaderAndIsrRequests \union {newControllerState} 
+ControllerUpdateIsr(newLeader, newIsr) == 
+    /\ newIsr # quorumState.isr
+    /\ \E newLeaderEpoch \in LeaderEpochSeq!IdSet :
+        /\ LeaderEpochSeq!NextId(newLeaderEpoch)
+        /\  LET newControllerState == [
+                leader |-> newLeader,
+                leaderEpoch |-> newLeaderEpoch, 
+                isr |-> newIsr] 
+            IN  /\ quorumState' = newControllerState 
+                /\ leaderAndIsrRequests' = leaderAndIsrRequests \union {newControllerState} 
+
+
 (**
  * The controller shrinks the ISR upon broker failure. We do not represent node failures
  * explicitly in this model. A broker can be taken out of the ISR and immediately begin
@@ -166,12 +174,15 @@ ControllerUpdateIsr(newLeader, newIsr) == \E newLeaderEpoch \in LeaderEpochSeq!I
  * step.
  *)
 ControllerShrinkIsr == \E replica \in Replicas :
+        \* case when a leader which is in ISR is shutdown *\
     /\  \/  /\ quorumState.leader = replica
             /\ quorumState.isr = {replica}
             /\ ControllerUpdateIsr(None, quorumState.isr)
+        \* case when a leader which is not in ISR is shutdown *\  
         \/  /\ quorumState.leader = replica
             /\ quorumState.isr # {replica}
             /\ ControllerUpdateIsr(None, quorumState.isr \ {replica})
+        \* case when a replica is removed from ISR *\
         \/  /\ quorumState.leader # replica
             /\ replica \in quorumState.isr
             /\ ControllerUpdateIsr(quorumState.leader, quorumState.isr \ {replica})
@@ -222,31 +233,8 @@ LeaderWrite == \E replica \in Replicas, id \in RecordSeq!IdSet, offset \in Repli
  *)
 QuorumUpdateLeaderAndIsr(leader, newIsr) ==
     /\ IsTrueLeader(leader)
-    /\ quorumState.leader = leader
     /\ quorumState' = [quorumState EXCEPT !.isr = newIsr]
     /\ replicaState' = [replicaState EXCEPT ![leader].isr = newIsr]
-
-IsFollowerCaughtUp(leader, follower, leaderHw) ==
-    /\ ReplicaIsFollowing(follower, leader) 
-    /\  \/ leaderHw = 0
-        \/  /\ leaderHw > 0 
-            /\ LET offset == leaderHw - 1 IN \E record \in LogRecords : 
-                /\ ReplicaLog!HasEntry(leader, record, offset)
-                /\ ReplicaLog!HasOffset(follower, offset)
-
-(**
- * ISR changes are fenced by the write to the quorum. There is some trickiness to make this
- * work in practice (i.e. propagation of the zkVersion), but this model ignores the details. 
- * We assume this logic is correct and simply allow the write if and only if the leader is 
- * the true leader in the quorum and has the current epoch.   
- *)
-LeaderShrinkIsr == \E leader \in Replicas :
-    /\ LET isr == replicaState[leader].isr
-           endOffset == ReplicaLog!GetEndOffset(leader) 
-       IN  \E replica \in isr \ {leader} :
-           /\ ~ IsFollowerCaughtUp(leader, replica, endOffset) 
-           /\ QuorumUpdateLeaderAndIsr(leader, isr \ {replica})
-    /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
  * This is the old logic for incrementing the high watermark. As long as each
@@ -264,29 +252,6 @@ LeaderIncHighWatermark == \E offset \in ReplicaLog!Offsets, leader \in Replicas 
         /\ ReplicaLog!HasOffset(follower, offset)
     /\ replicaState' = [replicaState EXCEPT ![leader].hw = @ + 1]
     /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
-
-(**
- * This is a helper for the follower state change. All that changed with the addition of 
- * KIP-101 and KIP-279 were improvements to the truncation logic upon becoming follower.
- * It is crucial that we do the truncation step on leader epoch changes, not just on 
- * leader changes.
- *
- * TODO: Is this what we actually do in the code?   
- *) 
-BecomeFollowerAndTruncateTo(leader, replica, truncationOffset) == \E leaderAndIsrRequest \in leaderAndIsrRequests :
-    /\ leader # replica
-    /\ leaderAndIsrRequest.leader = leader
-    /\ leaderAndIsrRequest.leaderEpoch > replicaState[replica].leaderEpoch
-    /\  \/  /\ leader = None
-            /\ UNCHANGED replicaLog
-        \/  /\ leader # None
-            /\ ReplicaLog!TruncateTo(replica, truncationOffset)
-    /\ replicaState' = [replicaState EXCEPT ![replica] = 
-        [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
-         leader |-> leader,
-         isr |-> leaderAndIsrRequest.isr,                                                        
-         hw |-> Min({truncationOffset, @.hw})]] 
-    /\ UNCHANGED <<nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
     
 OffsetsWithLargerEpochs(replica, epoch) ==
     {entry.offset : entry \in 
@@ -385,23 +350,70 @@ NoSplitBrain(leader) ==
         /\ replicaState[replica].leader # None
         /\ IsFollowingLeaderEpoch(leader, replica)
 (**
- * Followers can fetch as long as they have the same epoch as the leader. Prior to fetching,
- * followers are responsible for truncating the log so that it matches the leader's. The
+ * Followers can fetch as long as they have the same epoch as the leader. For newer protocol (>2.7), 
+ * truncateOnFetch is enabled which means that the follower truncates in the fetch state itself. The
  * local high watermark is updated at the time of fetching.
  *
  * diviv - todo - followers can only fetch the "local data" from the leader 
+ * 
+ * A replica will start with fetch if it has an epoch in the
  *)
 \*
 FencedFollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniing locally to the replica cannot be dependent on / conditional on states or change states which are not local to the leader
-    /\ IsFollowingLeaderEpoch(leader, follower)
-    /\ ReplicaLog!ReplicateTo(leader, follower)
-    /\ LET  newEndOffset == ReplicaLog!GetEndOffset(follower) + 1
-            leaderHw == replicaState[leader].hw
-            followerHw == Min({leaderHw, newEndOffset})
-       IN   replicaState' = [replicaState EXCEPT ![follower].hw = followerHw]
-    /\ ReplicaLog!SetStartOffset(follower, ReplicaLog!GetStartOffset(leader)) \* TODO - We are not deleting data, just incrementing the offset. Also in TS, this should be set to local start offset 
+    /\ replicaState.fetchState = "FETCH"
+    /\ IsFollowingLeaderEpoch(leader, follower) \* Ensures that we won't get unknown leader epoch or fenced leader epoch
+    /\ LET fetchOffset == ReplicaLog!GetEndOffset(follower)
+       IN   IF fetchOffset > ReplicaLog!GetEndOffset(leader) \* Case of out of range error
+            THEN    /\ ReplicaLog!TruncateTo(replica, ReplicaLog!GetEndOffset(leader))
+                    \* state remains as fetching
+                    \*/\ LET newHighWatermark == Min({ReplicaLog!GetEndOffset(replica), replicaState[replica].hw})
+             \* cDIVIJ - couldn't find code where we update Hw       \*   IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
+            ELSE IF fetchOffset < ReplicaLog!GetStartOffset(leader) \* TODO This changes to Global start offset for TS \* Case of out of range error
+            THEN    /\ ReplicaLog!TruncateFullyAndStartAt(replica, ReplicaLog!GetStartOffset(leader))
+                    \* state remains as fetching
+                    /\ LET newHighWatermark == ReplicaLog!GetEndOffset(replica)
+                       IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
+            ELSE IF LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, replica)
+            THEN     // truncate      
+            ELSE    /\ ReplicaLog!ReplicateTo(leader, follower)
+                    /\ LET  leaderHw == replicaState[leader].hw
+                       IN   /\ MaybeUpdateHw(follower, leaderHw)
+                            /\ MaybeUpdateLogStartOffset(follower, ReplicaLog!GetStartOffset(leader)) \* TODO - We are not deleting data, just incrementing the offset. Also in TS, this should be set to local start offset 
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
+(* Corresponds to UnifiedLog#maybeIncrementLogStartOffset
+ * 
+ *)
+MaybeIncrementLogStartOffset(replica, leaderLogStartOffset) ==
+    /\ replicaState[replica].hw >= leaderLogStartOffset
+    /\ leaderLogStartOffset > ReplicaLog!GetStartOffset(replica)
+    /\ ReplicaLog!SetStartOffset(replica, leaderLogStartOffset)
+    /\ ReplicaLog!TruncateFromTailTillOffset(replica, leaderLogStartOffset - 1)
+
+(* Corresponds to UnifiedLog#maybeUpdateHighWatermark
+ * 
+ *)
+MaybeUpdateHw(replica, newHw) ==
+    /\ LET newHighWatermark ==
+        /\ IF newHw < ReplicaLog!GetStartOffset(replica)
+           THEN ReplicaLog!GetStartOffset(replica)
+           ELSE IF newHw >= ReplicaLog!GetEndOffset(replica)
+           THEN ReplicaLog!GetEndOffset(replica)
+           ELSE newHw  
+       IN replicaState' = [replicaState EXCEPT ![replica].hw = newHighWatermark]
+(*
+ * In a truncate state, a follower will ask the leader for the end offsets of the latest epoch for it's partition and it will truncate
+ * itself to the end offset provided by the leader. The leader may send a fenced_leader_epoch in case the leader does not recognize the
+ * current leader epoch (not the partition epoch) sent by the follower, in which case, replica will fence the partition, i.e. it will do nothing if it's current epoch epoch is larger 
+ * than the leader epoch else fail the parition if it's current leader epoch is smaller than the leader epoch and will wait for new LISR
+ *)
+FollowerTruncate == \E follower, leader \in Replicas :
+    /\ replicaState.fetchState = "TRUNCATE" 
+        /\ IsFollowingLeaderEpoch(leader, follower)
+        /\ LET truncOffset == LookupOffsetForEpoch(leader, follower, ReplicaLog!GetLatestEpoch(follower))
+        IN ReplicaLog!TruncateTo(follower, truncOffset)
+    /\ replicaState' = [replicaState EXCEPT ![follower].fetchState = "FETCH"]
+    /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 (**
  * The high watermark is advanced if all members of the ISR are following the leader's
  * epoch and have replicated up to the current high watermark. Note that we depend only
@@ -417,19 +429,34 @@ FencedLeaderIncHighWatermark == \E leader \in Replicas :
     /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
- * A replica is taken out of the ISR by the leader if it is not following the right epoch 
- * or if its end offset is lagging. In this model, the decision to shrink the ISR is made 
- * arbitrarily by the leader if either of these conditions is met. It can choose to shrink 
- * the ISR immediately after becoming leader or it can wait indefinitely before doing so.
+ * A replica is taken out of the ISR by the leader if it is not "caught up". A replica is
+ * considered "caught-up" when its log end offset is equals to the log end offset of the leader OR when its last caught up time minus the current time is smaller than the max replica lag.
+ * In this model, the decision to shrink the ISR is made arbitrarily by the leader if the former condition is not met. ShrinkIsr triggered by the delayed lag is not supported by this model.
+ * The leader can choose to shrink the ISR immediately after becoming leader or it can wait indefinitely before doing so.
+ *
+ * Note that leader tells the controller to shrink the ISR using alterPartition API. Controller acknowledges the request and increments the partition epoch on the leader with the new ISR. This
+ * model does not capture the concept of controller changing the isr and incrementing the partition epoch.
+ * 
+ * Code reference: ReplicaManager#maybeShrinkIsr
  *)
-FencedLeaderShrinkIsr == \E leader \in Replicas :
+LeaderShrinkIsr == \E leader \in Replicas :
     /\ LET isr == replicaState[leader].isr
            leaderEndOffset == ReplicaLog!GetEndOffset(leader) 
        IN  \E follower \in isr \ {leader} :
-           /\ \/ ~ IsFollowingLeaderEpoch(leader, follower)
-              \/ ReplicaLog!GetEndOffset(follower) < leaderEndOffset
+        \*    /\ \/ ~ IsFollowingLeaderEpoch(leader, follower) TODO - should we include this?
+              \/ IsFollowerCaughtUp(leader, follower)
            /\ QuorumUpdateLeaderAndIsr(leader, isr \ {follower})
     /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, nextLeaderEpoch, leaderAndIsrRequests>>
+
+(**
+ * A replica is considered "caught-up" by the leader when its log end offset is equals to the log end offset of the leader OR when its last caught up time minus the current time is smaller than the max replica lag.
+ * In this model, the decision to shrink the ISR is made arbitrarily by the leader if the former condition is not met. ShrinkIsr triggered by the delayed lag is not supported by this model.
+ *
+ * Code reference: Partition#isFollowerOutOfSync()
+ *)
+IsFollowerCaughtUp(leader, follower) ==
+    /\ ReplicaIsFollowing(follower, leader)
+    /\ ReplicaLog!GetEndOffset(follower) == leaderEndOffset
 
 LOCAL HasHighWatermarkReachedCurrentEpoch(leader) ==
     LET hw == replicaState[leader].hw
@@ -464,12 +491,15 @@ FencedLeaderExpandIsr == \E leader \in Replicas :
            /\ QuorumUpdateLeaderAndIsr(leader, isr \union {follower})
     /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, nextLeaderEpoch, leaderAndIsrRequests>>
 
+(*
+ * corresponds to Partition#makeFollower
+ * Update the leader epoch and leader. Set the ISR to empty.
+ *)
 LOCAL BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark) ==
     replicaState' = [replicaState EXCEPT ![replica] = 
                          [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
                           leader |-> leaderAndIsrRequest.leader,
-                          isr |-> leaderAndIsrRequest.isr,                                                        
-                          hw |-> newHighWatermark]]
+                          isr |-> {}]]
 
 (**
  * The only improvement here over the KIP-279 truncation logic is that we ensure that the
@@ -482,28 +512,35 @@ LOCAL BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark) ==
  * Note: There is a call to leader here to fetch the end offset, start offset
  * 
  *)
-FencedBecomeFollowerAndTruncate == \E leader, replica \in Replicas, leaderAndIsrRequest \in leaderAndIsrRequests :
+FencedBecomeFollower == \E leader, replica \in Replicas, leaderAndIsrRequest \in leaderAndIsrRequests :
     /\ leader # replica
     /\ leaderAndIsrRequest.leader = leader
     /\ leaderAndIsrRequest.leaderEpoch > replicaState[replica].leaderEpoch
     /\  \/  /\ leader = None
-            /\ BecomeFollower(replica, leaderAndIsrRequest, replicaState[replica].hw)
+            /\ BecomeFollower(replica, leaderAndIsrRequest)
             /\ UNCHANGED replicaLog
         \/  /\ leader # None
             /\ ReplicaPresumesLeadership(leader)
             /\ replicaState[leader].leaderEpoch = leaderAndIsrRequest.leaderEpoch
-            /\  IF ReplicaLog!GetEndOffset(replica) > ReplicaLog!GetEndOffset(leader)
+            /\ BecomeFollower(replica, leaderAndIsrRequest)
+            /\ IF ReplicaLog!GetLatestEpoch # Nil
+               THEN replicaState' = [replicaState EXCEPT ![replica] = [fetchState |-> "FETCH"]]
+               ELSE replicaState' = [replicaState EXCEPT ![replica] = [fetchState |-> "TRUNCATE"]]
+    /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
+(*
+ * /\  IF ReplicaLog!GetEndOffset(replica) > ReplicaLog!GetEndOffset(leader)
                 THEN /\ ReplicaLog!TruncateTo(replica, ReplicaLog!GetEndOffset(leader))
                      /\ LET newHighWatermark == Min({ReplicaLog!GetEndOffset(replica), replicaState[replica].hw})
-                        IN BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
+                        IN BecomeFollower(replica, leaderAndIsrRequest)
                 ELSE IF ReplicaLog!GetEndOffset(replica) < ReplicaLog!GetStartOffset(leader)
                 THEN    /\ ReplicaLog!TruncateFullyAndStartAt(replica, ReplicaLog!GetStartOffset(leader))
                         /\ BecomeFollower(replica, leaderAndIsrRequest, ReplicaLog!GetEndOffset(replica))
                 ELSE LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, replica)  
                      IN /\ ReplicaLog!TruncateTo(replica, truncationOffset)
                         /\ LET newHighWatermark == Min({truncationOffset, replicaState[replica].hw})
-                           IN BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark)
-    /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+                           IN BecomeFollower(replica, leaderAndIsrRequest)
+ *)
 
 GetCommittedOffsets(replica) ==
     IF ReplicaLog!IsEmpty(replica)
@@ -536,37 +573,171 @@ HighWatermarkOk ==
  * The leader should always in the ISR, because even if all brokers failed, we still keep the leader in ISR
  *)
 LeaderInIsr == quorumState.leader \in quorumState.isr
+
+(**
+ * TODO - Start Offset always increases or returns to 0
+ *)
+
+ (**
+  * TODO - `logStartOffset <= logStableOffset <= highWatermark`
+  *)
+
 ---------------------------------------------------------------------------
 
-LOCAL Next ==
+\* LOCAL Next ==
+\*     \/ ControllerElectLeader 
+\*     \/ ControllerShrinkIsr
+\*     \/ BecomeLeader
+\*     \/ FencedLeaderExpandIsr
+\*     \/ FencedLeaderShrinkIsr
+\*     \/ LeaderWrite
+\*     \/ FencedLeaderIncHighWatermark 
+\*     \/ FencedBecomeFollowerAndTruncate
+\*     \/ FencedFollowerFetch
+\*     \/ ReplicaDataExpire
+
+\* \* In the initial state, spec is true iff, init is true AND [][Next]_vars is true in every step
+\* LOCAL Spec == Init /\ [][Next]_vars \* Init is true in initial state AND it is always true in every state that either next is true or vars is unchanged 
+\*              /\ SF_vars(FencedLeaderIncHighWatermark) \* it is always eventually true that LeaderIncHighWatermark can happen and it will eventually happen with a change in vars
+\*              /\ SF_vars(FencedLeaderExpandIsr)
+\*              /\ SF_vars(LeaderWrite)
+\*              /\ WF_vars(FencedBecomeFollowerAndTruncate)
+\*              /\ WF_vars(BecomeLeader) \* it is eventually always true that BecomeLeader can happen and it will happen with a change in vars
+             
+\* THEOREM Spec => []TypeOk
+\* THEOREM Spec => []LeaderInIsr
+\* THEOREM Spec => []WeakIsr
+\* THEOREM Spec => []StrongIsr
+
+---------------------------------------------------------------------------
+
+(***********)
+(* Actions *)
+(***********)
+
+(*
+ * Expiration of data in each replica based on the configured data retention settings.
+ * 
+ * With KIP 405, a replica cannot exire the data until the data has been archived. Replica fetches
+ * this information from RLMM.
+ *)
+ReplicaDataExpireKIP405 ==
+    /\ \E replica \in Replicas: \* TODO - should this be \A
+        /\ ~RemoteLog!IsEmpty \* For optimization, only enable this state if remote log is non-empty
+        /\ \E tillOffset \in GetCommittedOffsets(replica):
+            /\ tillOffset < RemoteLog!GetEndOffset \* tillOffset should be present in remote storage
+            /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
+    /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
+(**
+ * Entry criteria for this state: follower's endOffset < leader's local start offset
+ * 1. Follower fetches data from leader about target epoch
+ * 2. Follower builds history till that epoch from remote storage 
+ * 3. Follower truncates from start until
+ * 4. Follower fetches
+ *)
+\* targetEpoch should be defined at entry
+\* leader should have a local start offset > follower end offset (after truncation)
+\* follower should truncate from the start till leader.localLogstartOffset 
+\* after this follower should have a localLogStartOffset = leaderLogStartOffset
+\* followers epoch history chain.end >= targetEpoch
+\*
+FollowerBuildAuxState == \E leader, follower \in Replicas :
+    /\ IsFollowingLeaderEpoch(leader, follower)
+    \* The next conditions are to ensure that when we talk to the leader, leader should treat itself as leader.
+    /\ ReplicaPresumesLeadership(leader)
+    \* This is the enabling condition for going into BuildAux state
+    /\ ReplicaLog!GetEndOffset(follower) < GetLocalLogStartOffset(leader) \* TODO - add another condition that this is available globally
+    \* Truncate from start till leader's local log start offset
+    \* This also updates the start offset & end offset of the follower
+    /\ ReplicaLog!TruncateFullyAndStartAt(follower, GetLocalLogStartOffset(leader))
+    /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
+(*
+ * A replica which assumes itself to be the leader will write data to the remote storage till it's High watermark.
+ *) 
+LeaderArchiveToRemoteStorage == \E leader \in Replicas :
+       /\ ReplicaPresumesLeadership(leader)
+       /\ RemoteLog!GetEndOffset < GetHighWatermark(leader)
+       /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, RemoteLog!GetEndOffset), RemoteLog!GetEndOffset)
+       /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
+---------------------------------------------------------------------------
+
+(*****************)
+(* Specification *)
+(*****************)
+TypeOk ==
+    /\ LeaderEpochSeq!TypeOk
+    /\ RecordSeq!TypeOk
+    /\ ReplicaLog!TypeOk
+    /\ RemoteLog!TypeOk
+    /\ replicaState \in [Replicas -> ReplicaState]
+    /\ quorumState \in QuorumState
+    /\ leaderAndIsrRequests \subseteq QuorumState
+
+Next ==
     \/ ControllerElectLeader 
     \/ ControllerShrinkIsr
     \/ BecomeLeader
     \/ FencedLeaderExpandIsr
-    \/ FencedLeaderShrinkIsr
+    \/ LeaderShrinkIsr
     \/ LeaderWrite
     \/ FencedLeaderIncHighWatermark 
-    \/ FencedBecomeFollowerAndTruncate
+    \/ FencedBecomeFollower
     \/ FencedFollowerFetch
-    \/ ReplicaDataExpire
+    \/ ReplicaDataExpireKIP405
+    \/ FollowerBuildAuxState
+    \/ LeaderArchiveToRemoteStorage
 
-\* In the initial state, spec is true iff, init is true AND [][Next]_vars is true in every step
-LOCAL Spec == Init /\ [][Next]_vars \* Init is true in initial state AND it is always true in every state that either next is true or vars is unchanged 
-             /\ SF_vars(FencedLeaderIncHighWatermark) \* it is always eventually true that LeaderIncHighWatermark can happen and it will eventually happen with a change in vars
-             /\ SF_vars(FencedLeaderExpandIsr)
-             /\ SF_vars(LeaderWrite)
-             /\ WF_vars(FencedBecomeFollowerAndTruncate)
-             /\ WF_vars(BecomeLeader) \* it is eventually always true that BecomeLeader can happen and it will happen with a change in vars
-             
-THEOREM Spec => []TypeOk
-THEOREM Spec => []LeaderInIsr
-THEOREM Spec => []WeakIsr
-THEOREM Spec => []StrongIsr
+Spec == Init /\ [][Next]_vars
 
+---------------------------------------------------------------------------
+
+(**************)
+(* Invariants *)
+(**************)
+
+(*  This invariant states that the local records until the true leader's HW are consistently replicated amongst the members of true ISR.
+ *  This ensures that the local data that is exposed to the consumers will be present on any broker that becomes leader.
+ *)
+LocalLogConsistencyOk ==
+    \/ quorumState.leader = None
+    \/ LET leader == quorumState.leader IN
+       LET hw == replicaState[leader].hw
+       IN  \A isr \in quorumState.isr, offset \in RemoteLog!GetEndOffset .. (hw - 1) : \E record \in LogRecords : 
+                /\ ReplicaLog!HasEntry(leader, record, offset)       
+                /\ ReplicaLog!HasEntry(isr, record, offset)
+
+(*  
+ *  This invariant states that the records common to local log of a true ISR as well as remote log should be consistent.
+ *)
+OverlappingLogConsistencyOk ==
+    \A isr \in quorumState.isr :
+        /\ ~ ReplicaLog!IsEmpty(isr)
+        => \A offset \in GetLocalLogStartOffset(isr) .. (RemoteLog!GetEndOffset - 1) : 
+                \E record \in LogRecords : 
+                    /\ RemoteLog!HasEntry(record, offset)       
+                    /\ ReplicaLog!HasEntry(isr, record, offset)
+
+(* 
+ *  This invariant states that data which is not available locally would be available in remote log i.e.
+ *  there are no holes in the log.
+ *)
+LogContinuityOk == \A replica \in Replicas :
+    /\ IsTrueLeader(replica) => RemoteLog!GetEndOffset >= GetLocalLogStartOffset(replica) 
+
+(*
+ *  Uncommitted offsets on a leader cannot be moved to Remote Storage. However the leader's Hw might not have caught up to the true
+ *  Hw after an election. Hence, this property should be verified with strong fairness.
+ *)
+ArchiveCommittedRecords == \A leader \in Replicas :
+    /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset <= GetHighWatermark(leader)
+
+(* 
+TODO - the ISR should eventually catch up with the leader
+TODO - only committed messages are only given out to the consumer. A message is considered committed when all replicas in ISR have that message.
+TODO - the new leader must have the committed message
+ *)
+---------------------------------------------------------------------------
 =============================================================================
-\* Modification History
-\* Last modified Tue Dec 13 19:18:00 CET 2022 by diviv
-\* Last modified Fri Nov 04 14:35:06 UTC 2022 by ec2-user
-\* Last modified Thu Jan 02 14:37:55 PST 2020 by guozhang
-\* Last modified Mon Jul 09 14:24:02 PDT 2018 by jason
-\* Created Sun Jun 10 16:16:51 PDT 2018 by jason

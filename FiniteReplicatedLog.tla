@@ -86,6 +86,11 @@ GetLatestRecord(replica) == LET log == logs[replica] IN
     THEN NilRecord 
     ELSE log.records[log.endOffset - 1]
 
+GetLatestEpoch(replica) == LET log == logs[replica] IN 
+    IF IsEmpty(replica) 
+    THEN -1 
+    ELSE log.records[log.endOffset - 1].epoch
+
 IsLatestRecord(replica, record) == \E offset \in Offsets : IsLatestEntry(replica, record, offset)
 
 GetEndOffset(replica) == logs[replica].endOffset

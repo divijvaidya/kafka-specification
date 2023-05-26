@@ -91,7 +91,7 @@ Next ==
     \/ FencedLeaderShrinkIsr
     \/ LeaderWrite
     \/ FencedLeaderIncHighWatermark 
-    \/ FencedBecomeFollowerAndTruncate
+    \/ FencedBecomeFollower
     \/ FencedFollowerFetch
     \/ ReplicaDataExpireKIP405
     \/ FollowerBuildAuxState
