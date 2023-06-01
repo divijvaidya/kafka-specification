@@ -359,7 +359,7 @@ NoSplitBrain(leader) ==
  * A replica will start with fetch if it has an epoch in the
  *)
 \*
-FencedFollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniing locally to the replica cannot be dependent on / conditional on states or change states which are not local to the leader
+FollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniing locally to the replica cannot be dependent on / conditional on states or change states which are not local to the leader
     /\ replicaState.fetchState = "FETCH"
     /\ IsFollowingLeaderEpoch(leader, follower) \* Ensures that we won't get unknown leader epoch or fenced leader epoch
     /\ LET fetchOffset == ReplicaLog!GetEndOffset(follower)
@@ -685,7 +685,7 @@ Next ==
     \/ LeaderWrite
     \/ FencedLeaderIncHighWatermark 
     \/ FencedBecomeFollower
-    \/ FencedFollowerFetch
+    \/ FollowerFetch
     \/ ReplicaDataExpireKIP405
     \/ FollowerBuildAuxState
     \/ LeaderArchiveToRemoteStorage
@@ -738,6 +738,7 @@ ArchiveCommittedRecords == \A leader \in Replicas :
 TODO - the ISR should eventually catch up with the leader
 TODO - only committed messages are only given out to the consumer. A message is considered committed when all replicas in ISR have that message.
 TODO - the new leader must have the committed message
+TODO - whenever ISR changes, epic changes
  *)
 ---------------------------------------------------------------------------
 =============================================================================
