@@ -25,6 +25,9 @@
  * The controller in this model does not have its own state, but is able to influence
  * the behavior by directly modify a quorum state (i.e. zookeeper) and by propagating
  * LeaderAndIsr requests to the replicas.
+ * 
+ * Not covered - fetch isolation levels, 
+ * 
  *)
 
 EXTENDS Integers, Util, TLC
@@ -350,10 +353,12 @@ NoSplitBrain(leader) ==
         /\ replicaState[replica].leader # None
         /\ IsFollowingLeaderEpoch(leader, replica)
 (**
- * Followers can fetch as long as they have the same epoch as the leader. For newer protocol (>2.7), 
- * truncateOnFetch is enabled which means that the follower truncates in the fetch state itself. The
+ * Followers can fetch as long as the leader epoch according to them is same as leader epoch according to the leader. In all other cases, the leader will send error
+ * on fetch request which will lead to re-tries by the follower.
+ * 
+ * For newer protocol (> 2.7), truncateOnFetch is enabled which means that the follower truncates in the fetch state itself. The
  * local high watermark is updated at the time of fetching.
- *
+ * 
  * diviv - todo - followers can only fetch the "local data" from the leader 
  * 
  * A replica will start with fetch if it has an epoch in the
@@ -363,18 +368,20 @@ FollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniin
     /\ replicaState.fetchState = "FETCH"
     /\ IsFollowingLeaderEpoch(leader, follower) \* Ensures that we won't get unknown leader epoch or fenced leader epoch
     /\ LET fetchOffset == ReplicaLog!GetEndOffset(follower)
+           fetchEpoch == ReplicaLog!GetLatestEpoch(follower)
+           leaderEpoch == ReplicaLog!GetLatestEpoch(leader)
        IN   IF fetchOffset > ReplicaLog!GetEndOffset(leader) \* Case of out of range error
             THEN    /\ ReplicaLog!TruncateTo(replica, ReplicaLog!GetEndOffset(leader))
                     \* state remains as fetching
                     \*/\ LET newHighWatermark == Min({ReplicaLog!GetEndOffset(replica), replicaState[replica].hw})
-             \* cDIVIJ - couldn't find code where we update Hw       \*   IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
+             \* DIVIJ TODO - couldn't find code where we update Hw       \*   IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
             ELSE IF fetchOffset < ReplicaLog!GetStartOffset(leader) \* TODO This changes to Global start offset for TS \* Case of out of range error
             THEN    /\ ReplicaLog!TruncateFullyAndStartAt(replica, ReplicaLog!GetStartOffset(leader))
                     \* state remains as fetching
                     /\ LET newHighWatermark == ReplicaLog!GetEndOffset(replica)
                        IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
-            ELSE IF LET truncationOffset == FirstNonMatchingOffsetFromTail(leader, replica)
-            THEN     // truncate      
+            \* ELSE IF fetchEpoch > leaderEpoch || fetchOffset > TODO
+            \* THEN    /\ replicaState' = [replicaState EXCEPT ![follower].fetchState = "TRUNCATE"]
             ELSE    /\ ReplicaLog!ReplicateTo(leader, follower)
                     /\ LET  leaderHw == replicaState[leader].hw
                        IN   /\ MaybeUpdateHw(follower, leaderHw)
@@ -456,7 +463,7 @@ LeaderShrinkIsr == \E leader \in Replicas :
  *)
 IsFollowerCaughtUp(leader, follower) ==
     /\ ReplicaIsFollowing(follower, leader)
-    /\ ReplicaLog!GetEndOffset(follower) == leaderEndOffset
+    /\ ReplicaLog!GetEndOffset(follower) = ReplicaLog!GetEndOffset(leader)
 
 LOCAL HasHighWatermarkReachedCurrentEpoch(leader) ==
     LET hw == replicaState[leader].hw
@@ -547,41 +554,11 @@ GetCommittedOffsets(replica) ==
     THEN {}
     ELSE ReplicaLog!GetStartOffset(replica) .. GetHighWatermark(replica) - 1
 
-ReplicaDataExpire == \E replica \in Replicas:
-    /\ ~RemoteLog!IsEmpty \* For optimization, only enable this state if remote log is non-empty
-    /\ \E tillOffset \in GetCommittedOffsets(replica):
-        /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
-    /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
-
----------------------------------------------------------------------------
-
-(**************)
-(* Invariants *)
-(**************)
-
-HighWatermarkRangeOk == \A replica \in Replicas:
-    \/ /\ ReplicaLog!IsEmpty(replica)
-       /\ GetHighWatermark(replica) = ReplicaLog!GetEndOffset(replica)
-       /\ GetHighWatermark(replica) = ReplicaLog!GetStartOffset(replica)
-    \/ /\ GetHighWatermark(replica) <= ReplicaLog!GetEndOffset(replica)
-\*       /\ GetHighWatermark(replica) >= ReplicaLog!GetStartOffset(replica) this is not true for TS when local log start offset > loca hw which is in TS
-
-HighWatermarkOk == 
-    /\ HighWatermarkRangeOk
-
-(**
- * The leader should always in the ISR, because even if all brokers failed, we still keep the leader in ISR
- *)
-LeaderInIsr == quorumState.leader \in quorumState.isr
-
-(**
- * TODO - Start Offset always increases or returns to 0
- *)
-
- (**
-  * TODO - `logStartOffset <= logStableOffset <= highWatermark`
-  *)
-
+\* ReplicaDataExpire == \E replica \in Replicas:
+\*     /\ ~RemoteLog!IsEmpty \* For optimization, only enable this state if remote log is non-empty
+\*     /\ \E tillOffset \in GetCommittedOffsets(replica):
+\*         /\ ReplicaLog!TruncateFromTailTillOffset(replica, tillOffset)
+\*     /\ UNCHANGED <<remoteLog, nextRecordId, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 ---------------------------------------------------------------------------
 
 \* LOCAL Next ==
@@ -662,6 +639,7 @@ LeaderArchiveToRemoteStorage == \E leader \in Replicas :
        /\ RemoteLog!Append(ReplicaLog!GetRecordAtOffset(leader, RemoteLog!GetEndOffset), RemoteLog!GetEndOffset)
        /\ UNCHANGED <<nextRecordId, replicaLog, replicaState, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
+
 ---------------------------------------------------------------------------
 
 (*****************)
@@ -705,7 +683,7 @@ LocalLogConsistencyOk ==
     \/ quorumState.leader = None
     \/ LET leader == quorumState.leader IN
        LET hw == replicaState[leader].hw
-       IN  \A isr \in quorumState.isr, offset \in RemoteLog!GetEndOffset .. (hw - 1) : \E record \in LogRecords : 
+       IN  \A isr \in quorumState.isr, offset \in ReplicaLog!GetEndOffset .. (hw - 1) : \E record \in LogRecords : 
                 /\ ReplicaLog!HasEntry(leader, record, offset)       
                 /\ ReplicaLog!HasEntry(isr, record, offset)
 
@@ -729,16 +707,75 @@ LogContinuityOk == \A replica \in Replicas :
 
 (*
  *  Uncommitted offsets on a leader cannot be moved to Remote Storage. However the leader's Hw might not have caught up to the true
- *  Hw after an election. Hence, this property should be verified with strong fairness.
+ *  Hw after an election. Hence, this property should be verified with strong fairness. 
+ *  TODO - instead of GetHighWatermark(leader), test this with largest Hw amongst the replicas in ISR. Then we don't want strong fairness here. 
  *)
 ArchiveCommittedRecords == \A leader \in Replicas :
-    /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset <= GetHighWatermark(leader)
+    /\ IsTrueLeader(leader) => RemoteLog!GetEndOffset <= GetHighWatermark(leader) 
 
-(* 
+(*
+ * Check range of HW, e.g. HW <= end offset AND HW >= global start offset
+ * 
+ *)
+HighWatermarkRangeOk == \A replica \in Replicas:
+    \/ /\ ReplicaLog!IsEmpty(replica)
+       /\ GetHighWatermark(replica) = ReplicaLog!GetEndOffset(replica)
+       /\ GetHighWatermark(replica) = ReplicaLog!GetStartOffset(replica)
+    \/ /\ GetHighWatermark(replica) <= ReplicaLog!GetEndOffset(replica)
+\*       /\ GetHighWatermark(replica) >= ReplicaLog!GetStartOffset(replica) this is not true for TS when local log start offset > loca hw which is in TS
+
+HighWatermarkOk == 
+    /\ HighWatermarkRangeOk
+
+(**
+ * The leader should always in the ISR, because even if all brokers failed, we still keep the leader in ISR
+ *)
+LeaderInIsr == quorumState.leader \in quorumState.isr
+
+(*
+TODO - Start Offset always increases or returns to 0
+TODO - `logStartOffset <= logStableOffset <= highWatermark` 
 TODO - the ISR should eventually catch up with the leader
 TODO - only committed messages are only given out to the consumer. A message is considered committed when all replicas in ISR have that message.
 TODO - the new leader must have the committed message
 TODO - whenever ISR changes, epic changes
  *)
 ---------------------------------------------------------------------------
+
+(**************)
+(* Tests *)
+(**************)
+           
+TestReplicaHasMovedStartOffset ==
+    ~\E replica, leader \in Replicas:
+        /\ replica # leader
+        /\ IsTrueLeader(leader)
+        /\ ReplicaLog!GetStartOffset(replica) = 2 \* TODO - use the constant variable
+        /\ ReplicaLog!GetStartOffset(leader) = 2
+        /\ IsFollowingLeaderEpoch(leader, replica)
+        /\ GetHighWatermark(replica) = 3
+        /\ \E re \in replicaState[leader].isr:
+            /\ re = replica
+
+TestFollowerCatchesUpHw == ~\E replica, leader \in Replicas:
+    /\ replica # leader
+    /\ IsFollowingLeaderEpoch(leader, replica)
+    /\ GetHighWatermark(leader) > 0
+    /\ GetHighWatermark(replica) = GetHighWatermark(leader)
+
+TestFollowerStartOffsetIncreases == ~\E replica, leader \in Replicas:
+    /\ replica # leader
+    /\ IsFollowingLeaderEpoch(leader, replica)
+    /\ ReplicaLog!GetStartOffset(replica) = 2
+    /\ ReplicaLog!GetStartOffset(leader) = ReplicaLog!GetStartOffset(replica)
+
+TestFollowerEndOffsetIncreases == ~\E replica, leader \in Replicas:
+    /\ replica # leader
+    /\ IsFollowingLeaderEpoch(leader, replica)
+    /\ ReplicaLog!GetEndOffset(replica) = 1
+
+TestFollowerHwIncreases == ~\E replica, leader \in Replicas:
+    /\ replica # leader
+    /\ IsFollowingLeaderEpoch(leader, replica)
+    /\ GetHighWatermark(replica) = 1
 =============================================================================

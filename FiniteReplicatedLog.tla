@@ -91,6 +91,9 @@ GetLatestEpoch(replica) == LET log == logs[replica] IN
     THEN -1 
     ELSE log.records[log.endOffset - 1].epoch
 
+\* GetEndOffset(replica, epoch) == {entry.offset : entry \in TODO - will be used in fetchfollower
+\*         {entry \in GetAllEntries(replica) : entry.record.epoch  epoch}}
+
 IsLatestRecord(replica, record) == \E offset \in Offsets : IsLatestEntry(replica, record, offset)
 
 GetEndOffset(replica) == logs[replica].endOffset
