@@ -409,7 +409,7 @@ LOCAL HasFollowerReachedHighWatermark(leader, follower) ==
  *)
 \*
 FollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniing locally to the replica cannot be dependent on / conditional on states or change states which are not local to the leader
-    /\ replicaState.fetchState = "FETCH"
+    /\ replicaState[follower].fetchState = "FETCH"
     /\ IsFollowingLeaderEpoch(leader, follower) \* Ensures that we won't get unknown leader epoch or fenced leader epoch
     /\ LET fetchOffset == ReplicaLog!GetEndOffset(follower)
            fetchEpoch == ReplicaLog!GetLatestEpoch(follower)
