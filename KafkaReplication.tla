@@ -106,7 +106,7 @@ ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize},
                  leaderEpoch: LeaderEpochOpt,
                  leader : ReplicaOpt, 
                  isr: SUBSET Replicas,
-                 fetchState: {"FETCH", "TRUNCATE", "BUILDAUX"} \union Nil
+                 fetchState: {"FETCH", "TRUNCATE", "BUILDAUX"} \union None
                 ]
 
 GetHighWatermark(replica) == replicaState[replica].hw
@@ -122,7 +122,7 @@ Init ==
                                                  leaderEpoch |-> Nil, 
                                                  leader |-> None, 
                                                  isr |-> {},
-                                                 fetchState |-> Nil]]
+                                                 fetchState |-> None]]
     /\ quorumState = [leaderEpoch |-> Nil,
                       leader |-> None, 
                       isr |-> Replicas]
