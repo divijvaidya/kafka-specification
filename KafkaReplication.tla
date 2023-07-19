@@ -285,11 +285,12 @@ LOCAL HasFollowerReachedHighWatermark(leader, follower) ==
  * corresponds to Partition#makeFollower
  * Update the leader epoch and leader. Set the ISR to empty.
  *)
-LOCAL BecomeFollower(replica, leaderAndIsrRequest) ==
+LOCAL BecomeFollower(replica, leaderAndIsrRequest, fetchState) ==
     replicaState' = [replicaState EXCEPT ![replica] = 
                          [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
                           leader |-> leaderAndIsrRequest.leader,
-                          isr |-> {}]]
+                          isr |-> {},
+                          fetchState |-> fetchState]]
 
 (**
  * The controller shrinks the ISR upon broker failure. We do not represent node failures
@@ -479,15 +480,14 @@ FencedBecomeFollower == \E leader, replica \in Replicas, leaderAndIsrRequest \in
     /\ leaderAndIsrRequest.leader = leader
     /\ leaderAndIsrRequest.leaderEpoch > replicaState[replica].leaderEpoch
     /\  \/  /\ leader = None
-            /\ BecomeFollower(replica, leaderAndIsrRequest)
+            /\ BecomeFollower(replica, leaderAndIsrRequest, None)
             /\ UNCHANGED replicaLog
         \/  /\ leader # None
             /\ ReplicaPresumesLeadership(leader)
             /\ replicaState[leader].leaderEpoch = leaderAndIsrRequest.leaderEpoch
-            /\ BecomeFollower(replica, leaderAndIsrRequest)
             /\ IF ReplicaLog!GetLatestEpoch(replica) # Nil
-               THEN replicaState' = [replicaState EXCEPT ![replica] = [fetchState |-> "FETCH"]]
-               ELSE replicaState' = [replicaState EXCEPT ![replica] = [fetchState |-> "TRUNCATE"]]
+               THEN BecomeFollower(replica, leaderAndIsrRequest, "FETCH")
+               ELSE BecomeFollower(replica, leaderAndIsrRequest, "TRUNCATE")
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (*
