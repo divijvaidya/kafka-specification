@@ -106,7 +106,7 @@ ReplicaState == [hw : ReplicaLog!Offsets \union {LogSize},
                  leaderEpoch: LeaderEpochOpt,
                  leader : ReplicaOpt, 
                  isr: SUBSET Replicas,
-                 fetchState: {"FETCH", "TRUNCATE", "BUILDAUX"} \union None
+                 fetchState: {"FETCH", "TRUNCATE", "BUILDAUX"} \union {None}
                 ]
 
 GetHighWatermark(replica) == replicaState[replica].hw
