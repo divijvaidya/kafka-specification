@@ -39,7 +39,7 @@ CONSTANTS
     MaxLeaderEpoch
 
 None == "NONE"
-NilRecord == [id |-> -1, epoch |-> -1] 
+NilRecord == [id |-> -1, epoch |-> -1]
 Nil == -1
 
 ASSUME 
@@ -153,7 +153,7 @@ IsTrueLeader(leader) ==
  * Code Reference: PartitionChangeBuilder#triggerLeaderEpochBumpIfNeeded
  *)
 ControllerUpdateIsr(newLeader, newIsr) == 
-    /\ newIsr # quorumState.isr
+    \* /\ newIsr # quorumState.isr TODO - code doesn't proceed ahead without this after init -> ControllerUpdateIsr
     /\ \E newLeaderEpoch \in LeaderEpochSeq!IdSet :
         /\ LeaderEpochSeq!NextId(newLeaderEpoch)
         /\  LET newControllerState == [
@@ -161,75 +161,7 @@ ControllerUpdateIsr(newLeader, newIsr) ==
                 leaderEpoch |-> newLeaderEpoch, 
                 isr |-> newIsr] 
             IN  /\ quorumState' = newControllerState 
-                /\ leaderAndIsrRequests' = leaderAndIsrRequests \union {newControllerState} 
-
-
-(**
- * The controller shrinks the ISR upon broker failure. We do not represent node failures
- * explicitly in this model. A broker can be taken out of the ISR and immediately begin
- * fetching, or it can wait some time and fetch later. One way to look at this is that 
- * we do not distinguish between a properly shutdown broker which ceases fetching and 
- * a zombie which may continue to make progres. All states are checked.
- * 
- * Note that the leader can fail or do a controlled shutdown just like any other broker.
- * The leader is set to None in this case and removed from the ISR (as long as there is
- * at least one other replica in the ISR). Election of a new leader is done in a separate
- * step.
- *)
-ControllerShrinkIsr == \E replica \in Replicas :
-        \* case when a leader which is in ISR is shutdown *\
-    /\  \/  /\ quorumState.leader = replica
-            /\ quorumState.isr = {replica}
-            /\ ControllerUpdateIsr(None, quorumState.isr)
-        \* case when a leader which is not in ISR is shutdown *\  
-        \/  /\ quorumState.leader = replica
-            /\ quorumState.isr # {replica}
-            /\ ControllerUpdateIsr(None, quorumState.isr \ {replica})
-        \* case when a replica is removed from ISR *\
-        \/  /\ quorumState.leader # replica
-            /\ replica \in quorumState.isr
-            /\ ControllerUpdateIsr(quorumState.leader, quorumState.isr \ {replica})
-    /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, replicaState>>
-
-(**
- * Leader election by the controller is triggered by the failure of a broker or the need 
- * to balance leaders. For clean leader election, we choose a member of the ISR and we 
- * bump the leader epoch. In this model, the choice to elect a new leader can be made 
- * arbitarily by the controller. 
- *)
-ControllerElectLeader == \E newLeader \in quorumState.isr :
-    /\ quorumState.leader # newLeader 
-    /\ ControllerUpdateIsr(newLeader, quorumState.isr)
-    /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, replicaState>>
-
-(**
- * A replica will become a leader if it receives a LeaderAndIsr request with a higher
- * epoch than is in its local state. Significantly, the high watermark upon becoming
- * a leader is typically behind the "true" high watermark from the previous leader. 
- *)
-BecomeLeader == \E leaderAndIsrRequest \in leaderAndIsrRequests :
-    LET leader == leaderAndIsrRequest.leader
-    IN  /\ leader # None
-        /\ leaderAndIsrRequest.leaderEpoch > replicaState[leader].leaderEpoch
-        /\ replicaState' = [replicaState EXCEPT ![leader] = [
-                hw |-> @.hw,
-                leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,
-                leader |-> leader,
-                isr |-> leaderAndIsrRequest.isr]]
-        /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
-
-(**
- * A leader will accept a write from a producer as long as it presumes to be the leader.
- * In the event that it is wrong, we expect replication to fail, which will ultimately
- * result in an ISR shrink. Kafka's primary fencing of zombies comes in ISR shrinks.
- *)
-LeaderWrite == \E replica \in Replicas, id \in RecordSeq!IdSet, offset \in ReplicaLog!Offsets :
-    /\ ReplicaPresumesLeadership(replica)
-    /\ RecordSeq!NextId(id)
-    /\ LET record == [id |-> id, epoch |-> replicaState[replica].leaderEpoch]
-       IN ReplicaLog!Append(replica, record, offset)
-    /\ UNCHANGED <<remoteLog, replicaState, nextLeaderEpoch, quorumState, leaderAndIsrRequests>>
-
+                /\ leaderAndIsrRequests' = leaderAndIsrRequests \union {newControllerState}
 (**
  * Only the true leader (that is, the one currently designated in the quorum as the leader)
  * is allowed to update the ISR directly.
@@ -239,23 +171,6 @@ QuorumUpdateLeaderAndIsr(leader, newIsr) ==
     /\ quorumState' = [quorumState EXCEPT !.isr = newIsr]
     /\ replicaState' = [replicaState EXCEPT ![leader].isr = newIsr]
 
-(**
- * This is the old logic for incrementing the high watermark. As long as each
- * member of the ISR ackowledges the presumed leader and has replicated up to
- * the current offset (no leader epoch verification), then we increment the
- * high watermark. Note that we do not model the fetch behavior directly. As long
- * as the replicas have acknowledged the leader, they /could/ all send a fetch
- * to advance the high watermark. What we model here is the transition in this case.
- *)
-LeaderIncHighWatermark == \E offset \in ReplicaLog!Offsets, leader \in Replicas :
-    /\ ReplicaPresumesLeadership(leader)
-    /\ offset = replicaState[leader].hw
-    /\ \A follower \in replicaState[leader].isr : 
-        /\ ReplicaIsFollowing(follower, leader)
-        /\ ReplicaLog!HasOffset(follower, offset)
-    /\ replicaState' = [replicaState EXCEPT ![leader].hw = @ + 1]
-    /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
-    
 OffsetsWithLargerEpochs(replica, epoch) ==
     {entry.offset : entry \in 
         {entry \in ReplicaLog!GetAllEntries(replica) : entry.record.epoch > epoch}}
@@ -289,54 +204,23 @@ FirstNonMatchingOffsetFromTail(leader, follower) ==
     ELSE LET matchingOffsets == MatchingOffsets(follower, leader)
          IN IF matchingOffsets = {} 
             THEN ReplicaLog!GetStartOffset(leader)
-            ELSE Max(matchingOffsets) + 1 
+            ELSE Max(matchingOffsets) + 1
 
-(**
- * As long as a presumed leader and follower agree on the leader status, we will replicate 
- * the next record if possible. The main thing to note is the lack of proper fencing. 
- * We do not verify either the current leader epoch or the epoch of the most recent fetched
- * data. 
- *)
-FollowerReplicate == \E follower, leader \in Replicas :
-    /\ ReplicaPresumesLeadership(leader)
-    /\ ReplicaIsFollowing(follower, leader)
-    /\ ReplicaLog!ReplicateTo(leader, follower) 
-    /\ LET  newEndOffset == ReplicaLog!GetEndOffset(follower) + 1
-            leaderHw == replicaState[leader].hw
-            followerHw == Min({leaderHw, newEndOffset}) 
-       IN   replicaState' = [replicaState EXCEPT ![follower].hw = followerHw]
-    /\ UNCHANGED <<nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
-
-(**
- * The weak ISR property says that for any presumed leader, the replicas in its current
- * assumed ISR have replicated logs precisely up to the high watermark. This is a weak
- * property because the leaders are actually elected from the quorum ISR. Disagreement about
- * the true ISR can lead to the loss of committed data. In spite of its weakness, we 
- * intuitively expect it to be true, and it is illustrative to understand the cases in which
- * it doesn't
- *)
-WeakIsr == \A r1 \in Replicas :
-    \/ ~ ReplicaPresumesLeadership(r1)
-    \/ LET  hw == replicaState[r1].hw
-       IN   \/ hw = 0
-            \/ \A r2 \in replicaState[r1].isr, offset \in 0 .. (hw - 1) : \E record \in LogRecords : 
-                /\ ReplicaLog!HasEntry(r1, record, offset)        
-                /\ ReplicaLog!HasEntry(r2, record, offset)  
-
-(**
- * The strong ISR property says that if any replica presumes leadership, then all data below
- * its high watermark must be consistently replicated to all members of the true ISR. This 
- * ensures that any data which has been exposed to consumers will be present on any broker 
- * that becomes leader.
- *)
-StrongIsr == \A r1 \in Replicas :
-    \/ ~ ReplicaPresumesLeadership(r1)
-    \/ LET  hw == replicaState[r1].hw
-       IN   \/ hw = 0
-            \/ \A r2 \in quorumState.isr, offset \in 0 .. (hw - 1) : \E record \in LogRecords : 
-                /\ ReplicaLog!HasEntry(r1, record, offset)        
-                /\ ReplicaLog!HasEntry(r2, record, offset)
-
+\* (**
+\*  * As long as a presumed leader and follower agree on the leader status, we will replicate 
+\*  * the next record if possible. The main thing to note is the lack of proper fencing. 
+\*  * We do not verify either the current leader epoch or the epoch of the most recent fetched
+\*  * data. 
+\*  *)
+\* FollowerReplicate == \E follower, leader \in Replicas :
+\*     /\ ReplicaPresumesLeadership(leader)
+\*     /\ ReplicaIsFollowing(follower, leader)
+\*     /\ ReplicaLog!ReplicateTo(leader, follower) 
+\*     /\ LET  newEndOffset == ReplicaLog!GetEndOffset(follower) + 1
+\*             leaderHw == replicaState[leader].hw
+\*             followerHw == Min({leaderHw, newEndOffset}) 
+\*        IN   replicaState' = [replicaState EXCEPT ![follower].hw = followerHw]
+\*     /\ UNCHANGED <<nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 (**
  * TODO - In zookeeper mode, we check if the replica is alive. In KRaft mode, only replicas which are not fenced nor in controlled shutdown are
  * allowed to join the ISR.
@@ -396,6 +280,84 @@ LOCAL HasFollowerReachedHighWatermark(leader, follower) ==
     IN  \/ hw = 0
         \/ /\ hw > 0
            /\ ReplicaLog!HasOffset(follower, hw - 1)
+
+(*
+ * corresponds to Partition#makeFollower
+ * Update the leader epoch and leader. Set the ISR to empty.
+ *)
+LOCAL BecomeFollower(replica, leaderAndIsrRequest) ==
+    replicaState' = [replicaState EXCEPT ![replica] = 
+                         [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
+                          leader |-> leaderAndIsrRequest.leader,
+                          isr |-> {}]]
+
+(**
+ * The controller shrinks the ISR upon broker failure. We do not represent node failures
+ * explicitly in this model. A broker can be taken out of the ISR and immediately begin
+ * fetching, or it can wait some time and fetch later. One way to look at this is that 
+ * we do not distinguish between a properly shutdown broker which ceases fetching and 
+ * a zombie which may continue to make progres. All states are checked.
+ * 
+ * Note that the leader can fail or do a controlled shutdown just like any other broker.
+ * The leader is set to None in this case and removed from the ISR (as long as there is
+ * at least one other replica in the ISR). Election of a new leader is done in a separate
+ * step.
+ *)
+ControllerShrinkIsr == \E replica \in Replicas :
+        \* case when a leader which is in ISR is shutdown *\
+    /\  \/  /\ quorumState.leader = replica
+            /\ quorumState.isr = {replica}
+            /\ ControllerUpdateIsr(None, quorumState.isr)
+        \* case when a leader which is not in ISR is shutdown *\  
+        \/  /\ quorumState.leader = replica
+            /\ quorumState.isr # {replica}
+            /\ ControllerUpdateIsr(None, quorumState.isr \ {replica})
+        \* case when a replica is removed from ISR *\
+        \/  /\ quorumState.leader # replica
+            /\ replica \in quorumState.isr
+            /\ ControllerUpdateIsr(quorumState.leader, quorumState.isr \ {replica})
+    /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, replicaState>>
+
+(**
+ * Leader election by the controller is triggered by the failure of a broker or the need 
+ * to balance leaders. For clean leader election, we choose a member of the ISR and we 
+ * bump the leader epoch. In this model, the choice to elect a new leader can be made 
+ * arbitarily by the controller. 
+ *)
+ControllerElectLeader == \E newLeader \in quorumState.isr :
+    /\ quorumState.leader # newLeader 
+    /\ ControllerUpdateIsr(newLeader, quorumState.isr)
+    /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, replicaState>>
+
+(**
+ * A replica will become a leader if it receives a LeaderAndIsr request with a higher
+ * epoch than is in its local state. Significantly, the high watermark upon becoming
+ * a leader is typically behind the "true" high watermark from the previous leader. 
+ *)
+BecomeLeader == \E leaderAndIsrRequest \in leaderAndIsrRequests :
+    LET leader == leaderAndIsrRequest.leader
+    IN  /\ leader # None
+        /\ leaderAndIsrRequest.leaderEpoch > replicaState[leader].leaderEpoch
+        /\ replicaState' = [replicaState EXCEPT ![leader] = [
+                hw |-> @.hw,
+                leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,
+                leader |-> leader,
+                isr |-> leaderAndIsrRequest.isr,
+                fetchState |-> None]]
+        /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
+(**
+ * A leader will accept a write from a producer as long as it presumes to be the leader.
+ * In the event that it is wrong, we expect replication to fail, which will ultimately
+ * result in an ISR shrink. Kafka's primary fencing of zombies comes in ISR shrinks.
+ *)
+LeaderWrite == \E replica \in Replicas, id \in RecordSeq!IdSet, offset \in ReplicaLog!Offsets :
+    /\ ReplicaPresumesLeadership(replica)
+    /\ RecordSeq!NextId(id)
+    /\ LET record == [id |-> id, epoch |-> replicaState[replica].leaderEpoch]
+       IN ReplicaLog!Append(replica, record, offset)
+    /\ UNCHANGED <<remoteLog, replicaState, nextLeaderEpoch, quorumState, leaderAndIsrRequests>>
+
 (**
  * Followers can fetch as long as the leader epoch according to them is same as leader epoch according to the leader. In all other cases, the leader will send error
  * on fetch request which will lead to re-tries by the follower.
@@ -439,7 +401,7 @@ FollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniin
  * than the leader epoch else fail the parition if it's current leader epoch is smaller than the leader epoch and will wait for new LISR
  *)
 FollowerTruncate == \E follower, leader \in Replicas :
-    /\ replicaState.fetchState = "TRUNCATE" 
+    /\ replicaState[follower].fetchState = "TRUNCATE" 
         /\ IsFollowingLeaderEpoch(leader, follower)
         /\ LET truncOffset == LookupOffsetForEpoch(leader, follower, ReplicaLog!GetLatestEpoch(follower))
         IN ReplicaLog!TruncateTo(follower, truncOffset)
@@ -500,15 +462,6 @@ FencedLeaderExpandIsr == \E leader \in Replicas :
            /\ QuorumUpdateLeaderAndIsr(leader, isr \union {follower})
     /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, nextLeaderEpoch, leaderAndIsrRequests>>
 
-(*
- * corresponds to Partition#makeFollower
- * Update the leader epoch and leader. Set the ISR to empty.
- *)
-LOCAL BecomeFollower(replica, leaderAndIsrRequest) ==
-    replicaState' = [replicaState EXCEPT ![replica] = 
-                         [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
-                          leader |-> leaderAndIsrRequest.leader,
-                          isr |-> {}]]
 
 (**
  * The only improvement here over the KIP-279 truncation logic is that we ensure that the
@@ -666,6 +619,7 @@ Next ==
     \/ FencedLeaderIncHighWatermark 
     \/ FencedBecomeFollower
     \/ FollowerFetch
+    \/ FollowerTruncate
     \/ ReplicaDataExpireKIP405
     \/ FollowerBuildAuxState
     \/ LeaderArchiveToRemoteStorage
@@ -733,6 +687,36 @@ HighWatermarkOk ==
  * The leader should always in the ISR, because even if all brokers failed, we still keep the leader in ISR
  *)
 LeaderInIsr == quorumState.leader \in quorumState.isr
+
+(**
+ * The weak ISR property says that for any presumed leader, the replicas in its current
+ * assumed ISR have replicated logs precisely up to the high watermark. This is a weak
+ * property because the leaders are actually elected from the quorum ISR. Disagreement about
+ * the true ISR can lead to the loss of committed data. In spite of its weakness, we 
+ * intuitively expect it to be true, and it is illustrative to understand the cases in which
+ * it doesn't
+ *)
+WeakIsr == \A r1 \in Replicas :
+    \/ ~ ReplicaPresumesLeadership(r1)
+    \/ LET  hw == replicaState[r1].hw
+       IN   \/ hw = 0
+            \/ \A r2 \in replicaState[r1].isr, offset \in 0 .. (hw - 1) : \E record \in LogRecords : 
+                /\ ReplicaLog!HasEntry(r1, record, offset)        
+                /\ ReplicaLog!HasEntry(r2, record, offset)  
+
+(**
+ * The strong ISR property says that if any replica presumes leadership, then all data below
+ * its high watermark must be consistently replicated to all members of the true ISR. This 
+ * ensures that any data which has been exposed to consumers will be present on any broker 
+ * that becomes leader.
+ *)
+StrongIsr == \A r1 \in Replicas :
+    \/ ~ ReplicaPresumesLeadership(r1)
+    \/ LET  hw == replicaState[r1].hw
+       IN   \/ hw = 0
+            \/ \A r2 \in quorumState.isr, offset \in 0 .. (hw - 1) : \E record \in LogRecords : 
+                /\ ReplicaLog!HasEntry(r1, record, offset)        
+                /\ ReplicaLog!HasEntry(r2, record, offset)
 
 (*
 TODO - Start Offset always increases or returns to 0
