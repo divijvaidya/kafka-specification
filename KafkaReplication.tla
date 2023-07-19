@@ -352,41 +352,6 @@ NoSplitBrain(leader) ==
     /\ \A replica \in Replicas:
         /\ replicaState[replica].leader # None
         /\ IsFollowingLeaderEpoch(leader, replica)
-(**
- * Followers can fetch as long as the leader epoch according to them is same as leader epoch according to the leader. In all other cases, the leader will send error
- * on fetch request which will lead to re-tries by the follower.
- * 
- * For newer protocol (> 2.7), truncateOnFetch is enabled which means that the follower truncates in the fetch state itself. The
- * local high watermark is updated at the time of fetching.
- * 
- * diviv - todo - followers can only fetch the "local data" from the leader 
- * 
- * A replica will start with fetch if it has an epoch in the
- *)
-\*
-FollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniing locally to the replica cannot be dependent on / conditional on states or change states which are not local to the leader
-    /\ replicaState.fetchState = "FETCH"
-    /\ IsFollowingLeaderEpoch(leader, follower) \* Ensures that we won't get unknown leader epoch or fenced leader epoch
-    /\ LET fetchOffset == ReplicaLog!GetEndOffset(follower)
-           fetchEpoch == ReplicaLog!GetLatestEpoch(follower)
-           leaderEpoch == ReplicaLog!GetLatestEpoch(leader)
-       IN   IF fetchOffset > ReplicaLog!GetEndOffset(leader) \* Case of out of range error
-            THEN    /\ ReplicaLog!TruncateTo(replica, ReplicaLog!GetEndOffset(leader))
-                    \* state remains as fetching
-                    \*/\ LET newHighWatermark == Min({ReplicaLog!GetEndOffset(replica), replicaState[replica].hw})
-             \* DIVIJ TODO - couldn't find code where we update Hw       \*   IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
-            ELSE IF fetchOffset < ReplicaLog!GetStartOffset(leader) \* TODO This changes to Global start offset for TS \* Case of out of range error
-            THEN    /\ ReplicaLog!TruncateFullyAndStartAt(replica, ReplicaLog!GetStartOffset(leader))
-                    \* state remains as fetching
-                    /\ LET newHighWatermark == ReplicaLog!GetEndOffset(replica)
-                       IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
-            \* ELSE IF fetchEpoch > leaderEpoch || fetchOffset > TODO
-            \* THEN    /\ replicaState' = [replicaState EXCEPT ![follower].fetchState = "TRUNCATE"]
-            ELSE    /\ ReplicaLog!ReplicateTo(leader, follower)
-                    /\ LET  leaderHw == replicaState[leader].hw
-                       IN   /\ MaybeUpdateHw(follower, leaderHw)
-                            /\ MaybeUpdateLogStartOffset(follower, ReplicaLog!GetStartOffset(leader)) \* TODO - We are not deleting data, just incrementing the offset. Also in TS, this should be set to local start offset 
-    /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (* Corresponds to UnifiedLog#maybeIncrementLogStartOffset
  * 
@@ -408,6 +373,65 @@ MaybeUpdateHw(replica, newHw) ==
            THEN ReplicaLog!GetEndOffset(replica)
            ELSE newHw  
        IN replicaState' = [replicaState EXCEPT ![replica].hw = newHighWatermark]
+
+(**
+ * A replica is considered "caught-up" by the leader when its log end offset is equals to the log end offset of the leader OR when its last caught up time minus the current time is smaller than the max replica lag.
+ * In this model, the decision to shrink the ISR is made arbitrarily by the leader if the former condition is not met. ShrinkIsr triggered by the delayed lag is not supported by this model.
+ *
+ * Code reference: Partition#isFollowerOutOfSync()
+ *)
+IsFollowerCaughtUp(leader, follower) ==
+    /\ ReplicaIsFollowing(follower, leader)
+    /\ ReplicaLog!GetEndOffset(follower) = ReplicaLog!GetEndOffset(leader)
+
+LOCAL HasHighWatermarkReachedCurrentEpoch(leader) ==
+    LET hw == replicaState[leader].hw
+    IN  \/ hw = ReplicaLog!GetEndOffset(leader)
+        \/ \E record \in LogRecords :
+            /\ ReplicaLog!HasEntry(leader, record, hw)
+            /\ record.epoch = replicaState[leader].leaderEpoch
+
+LOCAL HasFollowerReachedHighWatermark(leader, follower) == 
+    LET hw == replicaState[leader].hw
+    IN  \/ hw = 0
+        \/ /\ hw > 0
+           /\ ReplicaLog!HasOffset(follower, hw - 1)
+(**
+ * Followers can fetch as long as the leader epoch according to them is same as leader epoch according to the leader. In all other cases, the leader will send error
+ * on fetch request which will lead to re-tries by the follower.
+ * 
+ * For newer protocol (> 2.7), truncateOnFetch is enabled which means that the follower truncates in the fetch state itself. The
+ * local high watermark is updated at the time of fetching.
+ * 
+ * diviv - todo - followers can only fetch the "local data" from the leader 
+ * 
+ * A replica will start with fetch if it has an epoch in the
+ *)
+\*
+FollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniing locally to the replica cannot be dependent on / conditional on states or change states which are not local to the leader
+    /\ replicaState.fetchState = "FETCH"
+    /\ IsFollowingLeaderEpoch(leader, follower) \* Ensures that we won't get unknown leader epoch or fenced leader epoch
+    /\ LET fetchOffset == ReplicaLog!GetEndOffset(follower)
+           fetchEpoch == ReplicaLog!GetLatestEpoch(follower)
+           leaderEpoch == ReplicaLog!GetLatestEpoch(leader)
+       IN   IF fetchOffset > ReplicaLog!GetEndOffset(leader) \* Case of out of range error
+            THEN    /\ ReplicaLog!TruncateTo(follower, ReplicaLog!GetEndOffset(leader))
+                    \* state remains as fetching
+                    \*/\ LET newHighWatermark == Min({ReplicaLog!GetEndOffset(replica), replicaState[replica].hw})
+             \* DIVIJ TODO - couldn't find code where we update Hw       \*   IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
+            ELSE IF fetchOffset < ReplicaLog!GetStartOffset(leader) \* TODO This changes to Global start offset for TS \* Case of out of range error
+            THEN    /\ ReplicaLog!TruncateFullyAndStartAt(follower, ReplicaLog!GetStartOffset(leader))
+                    \* state remains as fetching
+                    /\ LET newHighWatermark == ReplicaLog!GetEndOffset(follower)
+                       IN replicaState' = [replicaState EXCEPT ![follower].hw = newHighWatermark]
+            \* ELSE IF fetchEpoch > leaderEpoch || fetchOffset > TODO
+            \* THEN    /\ replicaState' = [replicaState EXCEPT ![follower].fetchState = "TRUNCATE"]
+            ELSE    /\ ReplicaLog!ReplicateTo(leader, follower)
+                    /\ LET  leaderHw == replicaState[leader].hw
+                       IN   /\ MaybeUpdateHw(follower, leaderHw)
+                            /\ MaybeUpdateLogStartOffset(follower, ReplicaLog!GetStartOffset(leader)) \* TODO - We are not deleting data, just incrementing the offset. Also in TS, this should be set to local start offset 
+    /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+
 (*
  * In a truncate state, a follower will ask the leader for the end offsets of the latest epoch for it's partition and it will truncate
  * itself to the end offset provided by the leader. The leader may send a fenced_leader_epoch in case the leader does not recognize the
@@ -456,28 +480,6 @@ LeaderShrinkIsr == \E leader \in Replicas :
     /\ UNCHANGED <<nextRecordId, replicaLog, remoteLog, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (**
- * A replica is considered "caught-up" by the leader when its log end offset is equals to the log end offset of the leader OR when its last caught up time minus the current time is smaller than the max replica lag.
- * In this model, the decision to shrink the ISR is made arbitrarily by the leader if the former condition is not met. ShrinkIsr triggered by the delayed lag is not supported by this model.
- *
- * Code reference: Partition#isFollowerOutOfSync()
- *)
-IsFollowerCaughtUp(leader, follower) ==
-    /\ ReplicaIsFollowing(follower, leader)
-    /\ ReplicaLog!GetEndOffset(follower) = ReplicaLog!GetEndOffset(leader)
-
-LOCAL HasHighWatermarkReachedCurrentEpoch(leader) ==
-    LET hw == replicaState[leader].hw
-    IN  \/ hw = ReplicaLog!GetEndOffset(leader)
-        \/ \E record \in LogRecords :
-            /\ ReplicaLog!HasEntry(leader, record, hw)
-            /\ record.epoch = replicaState[leader].leaderEpoch
-
-LOCAL HasFollowerReachedHighWatermark(leader, follower) == 
-    LET hw == replicaState[leader].hw
-    IN  \/ hw = 0
-        \/ /\ hw > 0
-           /\ ReplicaLog!HasOffset(follower, hw - 1)
-(**
  * Generally speaking, a replica which has caught up to the high watermark is eligible
  * to join the ISR, but there is one subtlety. When a follower becomes leader, 
  * its high watermark is typically behind the leader. Since it does not know what the true
@@ -502,7 +504,7 @@ FencedLeaderExpandIsr == \E leader \in Replicas :
  * corresponds to Partition#makeFollower
  * Update the leader epoch and leader. Set the ISR to empty.
  *)
-LOCAL BecomeFollower(replica, leaderAndIsrRequest, newHighWatermark) ==
+LOCAL BecomeFollower(replica, leaderAndIsrRequest) ==
     replicaState' = [replicaState EXCEPT ![replica] = 
                          [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
                           leader |-> leaderAndIsrRequest.leader,
@@ -530,7 +532,7 @@ FencedBecomeFollower == \E leader, replica \in Replicas, leaderAndIsrRequest \in
             /\ ReplicaPresumesLeadership(leader)
             /\ replicaState[leader].leaderEpoch = leaderAndIsrRequest.leaderEpoch
             /\ BecomeFollower(replica, leaderAndIsrRequest)
-            /\ IF ReplicaLog!GetLatestEpoch # Nil
+            /\ IF ReplicaLog!GetLatestEpoch(replica) # Nil
                THEN replicaState' = [replicaState EXCEPT ![replica] = [fetchState |-> "FETCH"]]
                ELSE replicaState' = [replicaState EXCEPT ![replica] = [fetchState |-> "TRUNCATE"]]
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
@@ -683,7 +685,7 @@ LocalLogConsistencyOk ==
     \/ quorumState.leader = None
     \/ LET leader == quorumState.leader IN
        LET hw == replicaState[leader].hw
-       IN  \A isr \in quorumState.isr, offset \in ReplicaLog!GetEndOffset .. (hw - 1) : \E record \in LogRecords : 
+       IN  \A isr \in quorumState.isr, offset \in RemoteLog!GetEndOffset .. (hw - 1) : \E record \in LogRecords : 
                 /\ ReplicaLog!HasEntry(leader, record, offset)       
                 /\ ReplicaLog!HasEntry(isr, record, offset)
 
