@@ -429,7 +429,7 @@ FollowerFetch == \E follower, leader \in Replicas : \* TODO - anything happeniin
             ELSE    /\ ReplicaLog!ReplicateTo(leader, follower)
                     /\ LET  leaderHw == replicaState[leader].hw
                        IN   /\ MaybeUpdateHw(follower, leaderHw)
-                            /\ MaybeUpdateLogStartOffset(follower, ReplicaLog!GetStartOffset(leader)) \* TODO - We are not deleting data, just incrementing the offset. Also in TS, this should be set to local start offset 
+                            /\ MaybeIncrementLogStartOffset(follower, ReplicaLog!GetStartOffset(leader)) \* TODO - We are not deleting data, just incrementing the offset. Also in TS, this should be set to local start offset 
     /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (*
