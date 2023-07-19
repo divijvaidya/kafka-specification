@@ -246,16 +246,18 @@ MaybeIncrementLogStartOffset(replica, leaderLogStartOffset) ==
     /\ ReplicaLog!SetStartOffset(replica, leaderLogStartOffset)
     /\ ReplicaLog!TruncateFromTailTillOffset(replica, leaderLogStartOffset - 1)
 
+CalculateHw(replica, newHw) ==
+        /\ IF newHw < ReplicaLog!GetStartOffset(replica)
+         THEN ReplicaLog!GetStartOffset(replica)
+         ELSE IF newHw >= ReplicaLog!GetEndOffset(replica)
+         THEN ReplicaLog!GetEndOffset(replica)
+         ELSE newHw  
+
 (* Corresponds to UnifiedLog#maybeUpdateHighWatermark
  * 
  *)
 MaybeUpdateHw(replica, newHw) ==
-    /\ LET newHighWatermark ==
-        /\ IF newHw < ReplicaLog!GetStartOffset(replica)
-           THEN ReplicaLog!GetStartOffset(replica)
-           ELSE IF newHw >= ReplicaLog!GetEndOffset(replica)
-           THEN ReplicaLog!GetEndOffset(replica)
-           ELSE newHw  
+    /\ LET newHighWatermark == CalculateHw(replica, newHw)
        IN replicaState' = [replicaState EXCEPT ![replica].hw = newHighWatermark]
 
 (**
@@ -289,7 +291,8 @@ LOCAL BecomeFollower(replica, leaderAndIsrRequest, fetchState) ==
     replicaState' = [replicaState EXCEPT ![replica] = 
                          [leaderEpoch |-> leaderAndIsrRequest.leaderEpoch,                                                          
                           leader |-> leaderAndIsrRequest.leader,
-                          isr |-> {},
+                          isr |-> leaderAndIsrRequest.isr,
+                          hw |-> @.hw,
                           fetchState |-> fetchState]]
 
 (**
@@ -488,7 +491,7 @@ FencedBecomeFollower == \E leader, replica \in Replicas, leaderAndIsrRequest \in
             /\ IF ReplicaLog!GetLatestEpoch(replica) # Nil
                THEN BecomeFollower(replica, leaderAndIsrRequest, "FETCH")
                ELSE BecomeFollower(replica, leaderAndIsrRequest, "TRUNCATE")
-    /\ UNCHANGED <<remoteLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
+    /\ UNCHANGED <<remoteLog, replicaLog, nextRecordId, quorumState, nextLeaderEpoch, leaderAndIsrRequests>>
 
 (*
  * /\  IF ReplicaLog!GetEndOffset(replica) > ReplicaLog!GetEndOffset(leader)
